@@ -32,7 +32,7 @@ log = logging.getLogger("babelcast-subtitle")
 
 COMPUTE_TYPE = os.environ.get("COMPUTE_TYPE", "float16")
 STT_MODEL = os.environ.get("STT_MODEL", "large-v3-turbo")
-LLM_MODEL = os.environ.get("LLM_MODEL", "google/translate-gemma-12b-it")
+LLM_MODEL = os.environ.get("LLM_MODEL", "google/translategemma-4b-it")
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 # ── Global model state ───────────────────────────────────────────────────────
