@@ -31,6 +31,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # System deps — minimal for inference only
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.11 python3.11-venv python3.11-dev python3-pip \
+    build-essential cmake \
     ffmpeg libsndfile1 curl && \
     ln -sf /usr/bin/python3.11 /usr/bin/python3 && \
     rm -rf /var/lib/apt/lists/*
@@ -38,14 +39,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # Install Python deps
-# - llama-cpp-python: pre-built CUDA wheel from abetlen index (avoids compiling from source)
+# - llama-cpp-python: installed at RUNTIME in start.sh (needs CUDA toolkit on GPU host)
 # - faster-whisper: CTranslate2-based STT (4.7.1+ has Blackwell fixes)
 # - httpx: async HTTP client for llama.cpp subprocess communication
 ARG CUDA_INDEX=https://download.pytorch.org/whl/cu128
-ARG LLAMA_CPP_INDEX=https://abetlen.github.io/llama-cpp-python/whl/cu128
 RUN pip install --no-cache-dir \
-    "llama-cpp-python[server]>=0.3.19" --extra-index-url ${LLAMA_CPP_INDEX} && \
-    pip install --no-cache-dir \
     "faster-whisper>=1.2.1" \
     "ctranslate2>=4.7.1" \
     torch==2.11.0 --index-url ${CUDA_INDEX} && \
