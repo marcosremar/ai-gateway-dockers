@@ -43,11 +43,12 @@ WORKDIR /app
 # - faster-whisper: CTranslate2-based STT (4.7.1+ has Blackwell fixes)
 # - httpx: async HTTP client for llama.cpp subprocess communication
 ARG CUDA_INDEX=https://download.pytorch.org/whl/cu128
+# Step 1: PyTorch from CUDA 12.8 index
+RUN pip install --no-cache-dir torch==2.11.0 --index-url ${CUDA_INDEX}
+# Step 2: Everything else from PyPI (faster-whisper, ctranslate2, etc.)
 RUN pip install --no-cache-dir \
     "faster-whisper>=1.2.1" \
     "ctranslate2>=4.7.1" \
-    torch==2.11.0 --index-url ${CUDA_INDEX} && \
-    pip install --no-cache-dir \
     httpx \
     huggingface-hub \
     uvicorn[standard] \
