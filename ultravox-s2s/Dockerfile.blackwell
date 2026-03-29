@@ -1,0 +1,61 @@
+# Ultravox Speech-to-Speech — Blackwell GPU image (RTX 5090/5080)
+#
+# Base: nvidia/cuda:12.8.1 (native Blackwell support, driver 570+)
+# ENTRYPOINT reset for Vast.ai compatibility
+
+FROM nvidia/cuda:12.8.1-cudnn-devel-ubuntu22.04
+
+ENTRYPOINT []
+
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 DEBIAN_FRONTEND=noninteractive
+
+WORKDIR /app
+
+# ── Python 3.11 + system deps ──
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    software-properties-common && \
+    add-apt-repository -y ppa:deadsnakes/ppa && \
+    apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 python3.11-dev python3.11-venv python3-pip \
+    ffmpeg libsndfile1 sox libsox-dev curl \
+    libgomp1 libsndfile1-dev \
+    && ln -sf /usr/bin/python3.11 /usr/local/bin/python3 \
+    && ln -sf /usr/bin/python3.11 /usr/local/bin/python \
+    && python3 -m pip install --no-cache-dir --upgrade pip \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── PyTorch (CUDA 12.8 — native Blackwell) ──
+RUN pip3 install --no-cache-dir torch torchvision torchaudio \
+    --index-url https://download.pytorch.org/whl/cu128
+
+# ── Ultravox deps ──
+RUN pip install --no-cache-dir \
+    "transformers>=4.45.0" "accelerate>=1.12.0" \
+    peft librosa soundfile numpy scipy
+
+# ── Web framework ──
+RUN pip install --no-cache-dir \
+    "fastapi>=0.115.0" "uvicorn[standard]>=0.32.0" \
+    python-multipart httpx websockets \
+    "huggingface-hub>=0.26.0" hf_transfer \
+    "pydantic-settings>=2.0" \
+    "aiortc>=1.9.0" av
+
+# ── Qwen3-TTS ──
+RUN pip install --no-cache-dir einops onnxruntime sox && \
+    pip install --no-cache-dir "faster-qwen3-tts>=0.2.4"
+
+RUN rm -rf /root/.cache/pip /tmp/pip-*
+
+ENV HF_HOME=/app/.cache/huggingface HF_HUB_ENABLE_HF_TRANSFER=1
+
+COPY api/ /app/api/
+COPY start.sh /app/start.sh
+RUN chmod +x /app/start.sh && chmod -R 777 /app/.cache 2>/dev/null || true
+
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=10s --retries=5 \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+CMD ["/app/start.sh"]
