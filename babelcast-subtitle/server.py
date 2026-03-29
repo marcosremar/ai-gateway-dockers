@@ -1,6 +1,9 @@
 """
-BabelCast Subtitle Server — Faster Whisper STT + TranslateGemma 12B LLM
+BabelCast Subtitle Server — Faster Whisper STT + TranslateGemma 4B LLM (llama.cpp)
 No TTS. Runs on all NVIDIA GPUs (Blackwell sm_120 through Ampere sm_80).
+
+LLM runs as a llama.cpp subprocess with GGUF quantized model for maximum
+inference speed. Flash attention + large batch size for optimal throughput.
 
 Endpoints:
   GET  /health              — Service status + model readiness
@@ -12,15 +15,15 @@ Endpoints:
 """
 
 import os
-import io
 import time
-import json
 import logging
 import asyncio
+import subprocess
 import tempfile
 from contextlib import asynccontextmanager
 
 import torch
+import httpx
 import uvicorn
 from fastapi import FastAPI, File, UploadFile, Form, Request
 from fastapi.responses import JSONResponse
@@ -32,14 +35,21 @@ log = logging.getLogger("babelcast-subtitle")
 
 COMPUTE_TYPE = os.environ.get("COMPUTE_TYPE", "float16")
 STT_MODEL = os.environ.get("STT_MODEL", "large-v3-turbo")
-LLM_MODEL = os.environ.get("LLM_MODEL", "google/translategemma-4b-it")
+LLM_REPO = os.environ.get("LLM_REPO", "bullerwins/translategemma-4b-it-GGUF")
+LLM_FILENAME = os.environ.get("LLM_FILENAME", "translategemma-4b-it-Q8_0.gguf")
+LLM_PORT = 8002
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+# llama.cpp tuning — overridable via env
+N_CTX = int(os.environ.get("N_CTX", "1024"))
+N_BATCH = int(os.environ.get("N_BATCH", "1024"))
+N_UBATCH = int(os.environ.get("N_UBATCH", "512"))
+FLASH_ATTN = os.environ.get("FLASH_ATTN", "true").lower() == "true"
 
 # ── Global model state ───────────────────────────────────────────────────────
 
 stt_model = None
-llm_model = None
-llm_tokenizer = None
+llm_client: httpx.AsyncClient | None = None
 boot_time = time.time()
 
 service_status = {
@@ -55,27 +65,22 @@ def _detect_compute_type() -> str:
     cap = torch.cuda.get_device_capability()
     arch = cap[0] * 10 + cap[1]
     if arch >= 120:
-        # Blackwell (sm_120): INT8 tensor cores have kernel issues, use float16
         log.info(f"Detected Blackwell GPU (sm_{arch}) — using float16")
         return "float16"
-    if COMPUTE_TYPE != "float16":
-        return COMPUTE_TYPE
-    return "float16"
+    return COMPUTE_TYPE
 
 
-async def _load_models():
-    """Load STT and LLM models in background."""
-    global stt_model, llm_model, llm_tokenizer
+# ── Background model loading ────────────────────────────────────────────────
 
-    # Load STT (Faster Whisper)
+async def _load_stt():
+    """Load Faster Whisper STT model."""
+    global stt_model
     try:
         service_status["whisper"] = "downloading"
-        log.info(f"Loading Faster Whisper ({STT_MODEL}) on {DEVICE} with {_detect_compute_type()}...")
+        log.info(f"Loading Faster Whisper ({STT_MODEL}) on {DEVICE}...")
         from faster_whisper import WhisperModel
-        stt_model = WhisperModel(
-            STT_MODEL,
-            device=DEVICE,
-            compute_type=_detect_compute_type(),
+        stt_model = await asyncio.to_thread(
+            WhisperModel, STT_MODEL, device=DEVICE, compute_type=_detect_compute_type()
         )
         service_status["whisper"] = "loaded"
         log.info(f"STT ready ({STT_MODEL})")
@@ -83,33 +88,74 @@ async def _load_models():
         service_status["whisper"] = f"error: {e}"
         log.error(f"STT load failed: {e}")
 
-    # Load LLM (TranslateGemma)
+
+async def _load_llm():
+    """Download GGUF model, start llama.cpp subprocess, wait for ready."""
+    global llm_client
     try:
         service_status["llm"] = "downloading"
-        log.info(f"Loading {LLM_MODEL} on {DEVICE}...")
-        from transformers import AutoTokenizer, AutoModelForCausalLM
-        llm_tokenizer = AutoTokenizer.from_pretrained(LLM_MODEL)
-        llm_model = AutoModelForCausalLM.from_pretrained(
-            LLM_MODEL,
-            torch_dtype=torch.float16,
-            device_map="auto",
-        )
-        service_status["llm"] = "loaded"
-        log.info(f"LLM ready ({LLM_MODEL})")
+        log.info(f"Downloading GGUF: {LLM_REPO}/{LLM_FILENAME}...")
+
+        from huggingface_hub import hf_hub_download, try_to_load_from_cache
+        # Fast path: check cache first
+        cached = await asyncio.to_thread(try_to_load_from_cache, LLM_REPO, LLM_FILENAME)
+        if cached:
+            gguf_path = cached
+            log.info(f"GGUF found in cache: {gguf_path}")
+        else:
+            gguf_path = await asyncio.to_thread(hf_hub_download, LLM_REPO, LLM_FILENAME)
+            log.info(f"GGUF downloaded: {gguf_path}")
     except Exception as e:
-        service_status["llm"] = f"error: {e}"
-        log.error(f"LLM load failed: {e}")
+        service_status["llm"] = f"download_failed: {e}"
+        log.error(f"GGUF download failed: {e}")
+        return
+
+    # Start llama.cpp server subprocess
+    service_status["llm"] = "starting"
+    cmd = [
+        "python3", "-m", "llama_cpp.server",
+        "--host", "127.0.0.1", "--port", str(LLM_PORT),
+        "--model", gguf_path,
+        "--n_gpu_layers", "99",
+        "--n_ctx", str(N_CTX),
+        "--n_batch", str(N_BATCH),
+        "--n_ubatch", str(N_UBATCH),
+    ]
+    if FLASH_ATTN:
+        cmd += ["--flash_attn", "true"]
+
+    log.info(f"Starting llama.cpp: flash_attn={FLASH_ATTN}, n_batch={N_BATCH}, n_ctx={N_CTX}")
+    try:
+        with open("/tmp/llama.log", "w") as log_f:
+            subprocess.Popen(cmd, stdout=log_f, stderr=subprocess.STDOUT)
+    except Exception as e:
+        service_status["llm"] = f"start_failed: {e}"
+        log.error(f"Failed to start llama.cpp: {e}")
+        return
+
+    # Poll until ready (up to 5 min)
+    llm_client = httpx.AsyncClient(base_url=f"http://127.0.0.1:{LLM_PORT}", timeout=10.0)
+    for attempt in range(60):
+        await asyncio.sleep(3 if attempt < 10 else 5)
+        try:
+            r = await llm_client.get("/health")
+            if r.status_code == 200:
+                service_status["llm"] = "ready"
+                log.info(f"llama.cpp ready after {attempt * 3}s")
+                return
+        except Exception:
+            pass
+    service_status["llm"] = "failed: timeout"
+    log.error("llama.cpp failed to start within timeout")
 
 
 # ── App ──────────────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    asyncio.create_task(asyncio.to_thread(_load_models_sync))
+    asyncio.create_task(_load_stt())
+    asyncio.create_task(_load_llm())
     yield
-
-def _load_models_sync():
-    asyncio.run(_load_models())
 
 app = FastAPI(title="BabelCast Subtitle", lifespan=lifespan)
 
@@ -125,7 +171,7 @@ async def health():
         "services": service_status,
         "model_warmth": {
             "stt": {"warm": service_status["whisper"] == "loaded"},
-            "llm": {"warm": service_status["llm"] == "loaded"},
+            "llm": {"warm": service_status["llm"] == "ready"},
         },
     }
 
@@ -134,11 +180,12 @@ async def health():
 async def version():
     cap = torch.cuda.get_device_capability() if DEVICE == "cuda" else (0, 0)
     return {
-        "version": "subtitle-1.0",
+        "version": "subtitle-2.0",
         "type": "subtitle",
         "cuda_arch": f"sm_{cap[0]*10+cap[1]}",
         "compute_type": _detect_compute_type(),
-        "models": {"stt": STT_MODEL, "llm": LLM_MODEL},
+        "models": {"stt": STT_MODEL, "llm": f"{LLM_REPO}/{LLM_FILENAME}"},
+        "llm_config": {"flash_attn": FLASH_ATTN, "n_batch": N_BATCH, "n_ctx": N_CTX},
     }
 
 
@@ -160,10 +207,7 @@ async def transcribe(
 
         t0 = time.time()
         segments, info = stt_model.transcribe(
-            tmp.name,
-            language=language,
-            beam_size=1,
-            vad_filter=True,
+            tmp.name, language=language, beam_size=1, vad_filter=True,
         )
         text = " ".join(s.text.strip() for s in segments)
         latency_ms = round((time.time() - t0) * 1000)
@@ -181,8 +225,8 @@ async def transcribe(
 
 @app.post("/v1/translate/text")
 async def translate_text(request: Request):
-    if llm_model is None or llm_tokenizer is None:
-        return JSONResponse(status_code=503, content={"error": "LLM model not loaded yet"})
+    if llm_client is None or service_status["llm"] != "ready":
+        return JSONResponse(status_code=503, content={"error": "LLM not ready yet"})
 
     body = await request.json()
     text = body.get("text", "")
@@ -190,20 +234,19 @@ async def translate_text(request: Request):
     target_lang = body.get("target_lang", "es")
 
     prompt = f"Translate from {source_lang} to {target_lang}: {text}"
-    inputs = llm_tokenizer(prompt, return_tensors="pt").to(llm_model.device)
 
     t0 = time.time()
-    with torch.no_grad():
-        outputs = llm_model.generate(
-            **inputs,
-            max_new_tokens=512,
-            do_sample=False,
-        )
-    translated = llm_tokenizer.decode(outputs[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
+    r = await llm_client.post("/v1/chat/completions", json={
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 512,
+        "temperature": 0,
+    })
+    data = r.json()
+    translated = data["choices"][0]["message"]["content"].strip()
     latency_ms = round((time.time() - t0) * 1000)
 
     return {
-        "translated_text": translated.strip(),
+        "translated_text": translated,
         "source_lang": source_lang,
         "target_lang": target_lang,
         "latency_ms": latency_ms,
@@ -212,46 +255,21 @@ async def translate_text(request: Request):
 
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
-    if llm_model is None or llm_tokenizer is None:
-        return JSONResponse(status_code=503, content={"error": "LLM model not loaded yet"})
+    if llm_client is None or service_status["llm"] != "ready":
+        return JSONResponse(status_code=503, content={"error": "LLM not ready yet"})
 
     body = await request.json()
-    messages = body.get("messages", [])
-
-    # Build prompt from messages
-    prompt_parts = []
-    for msg in messages:
-        role = msg.get("role", "user")
-        content = msg.get("content", "")
-        prompt_parts.append(f"{role}: {content}")
-    prompt = "\n".join(prompt_parts)
-
-    inputs = llm_tokenizer(prompt, return_tensors="pt").to(llm_model.device)
-
     t0 = time.time()
-    with torch.no_grad():
-        outputs = llm_model.generate(
-            **inputs,
-            max_new_tokens=body.get("max_tokens", 512),
-            do_sample=body.get("temperature", 0) > 0,
-            temperature=body.get("temperature", 1.0) if body.get("temperature", 0) > 0 else 1.0,
-        )
-    response_text = llm_tokenizer.decode(outputs[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
+    r = await llm_client.post("/v1/chat/completions", json={
+        "messages": body.get("messages", []),
+        "max_tokens": body.get("max_tokens", 512),
+        "temperature": body.get("temperature", 0),
+    })
+    data = r.json()
     latency_ms = round((time.time() - t0) * 1000)
 
-    return {
-        "id": f"chatcmpl-{int(time.time()*1000)}",
-        "object": "chat.completion",
-        "created": int(time.time()),
-        "model": LLM_MODEL,
-        "choices": [{
-            "index": 0,
-            "message": {"role": "assistant", "content": response_text.strip()},
-            "finish_reason": "stop",
-        }],
-        "usage": {"prompt_tokens": inputs["input_ids"].shape[1], "completion_tokens": len(outputs[0]) - inputs["input_ids"].shape[1]},
-        "latency_ms": latency_ms,
-    }
+    data["latency_ms"] = latency_ms
+    return data
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────

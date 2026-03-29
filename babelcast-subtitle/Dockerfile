@@ -8,6 +8,9 @@
 #
 # CUDA 12.8.1 is the minimum for RTX 5090/5080 (sm_120) and includes kernels
 # for all older architectures. One image runs everywhere.
+#
+# LLM: TranslateGemma 4B Q8_0 via llama.cpp (flash_attn + n_batch=1024)
+# STT: Faster Whisper large-v3-turbo via CTranslate2
 # ─────────────────────────────────────────────────────────────────────────────
 
 ARG BASE_IMAGE=nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
@@ -16,33 +19,46 @@ FROM ${BASE_IMAGE}
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    # Default to float16 — safe on all GPUs including Blackwell.
-    # INT8 tensor cores have issues on sm_120; float16 is universally reliable.
-    COMPUTE_TYPE=float16
+    COMPUTE_TYPE=float16 \
+    # LLM defaults — override via env at runtime
+    LLM_REPO=bullerwins/translategemma-4b-it-GGUF \
+    LLM_FILENAME=translategemma-4b-it-Q8_0.gguf \
+    N_CTX=1024 \
+    N_BATCH=1024 \
+    N_UBATCH=512 \
+    FLASH_ATTN=true
 
 # System deps — minimal for inference only
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.11 python3.11-venv python3.11-dev python3-pip \
+    build-essential cmake \
     ffmpeg libsndfile1 curl && \
     ln -sf /usr/bin/python3.11 /usr/bin/python3 && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Install Python deps — CTranslate2 4.7.1+ has Blackwell sm_120 fixes
-# PyTorch cu128 wheels work on CUDA 12.8+ (Blackwell + older GPUs)
+# Install Python deps
+# - llama-cpp-python: GGUF inference with CUDA + flash attention
+# - faster-whisper: CTranslate2-based STT (4.7.1+ has Blackwell fixes)
+# - httpx: async HTTP client for llama.cpp subprocess communication
 ARG CUDA_INDEX=https://download.pytorch.org/whl/cu128
-RUN pip install --no-cache-dir \
-    faster-whisper>=1.2.1 \
+RUN CMAKE_ARGS="-DGGML_CUDA=on" pip install --no-cache-dir \
+    "llama-cpp-python[server]>=0.3.19" && \
+    pip install --no-cache-dir \
+    "faster-whisper>=1.2.1" \
     "ctranslate2>=4.7.1" \
     torch==2.11.0 --index-url ${CUDA_INDEX} && \
     pip install --no-cache-dir \
-    transformers>=4.48.0 \
-    accelerate \
-    sentencepiece \
-    protobuf \
+    httpx \
+    huggingface-hub \
     uvicorn[standard] \
     fastapi
+
+# Pre-download GGUF model into image cache (saves 2-5 min on cold boot)
+RUN python3 -c "from huggingface_hub import hf_hub_download; \
+    hf_hub_download('bullerwins/translategemma-4b-it-GGUF', 'translategemma-4b-it-Q8_0.gguf')" \
+    || echo "GGUF pre-download skipped (will download at boot)"
 
 COPY server.py .
 COPY start.sh .
@@ -50,7 +66,6 @@ RUN chmod +x start.sh
 
 EXPOSE 8000
 
-# Health check — gateway polls /health to know when models are loaded
 HEALTHCHECK --interval=10s --timeout=5s --start-period=120s --retries=3 \
     CMD curl -sf http://localhost:8000/health || exit 1
 
