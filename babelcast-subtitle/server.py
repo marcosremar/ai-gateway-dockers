@@ -152,7 +152,7 @@ async def _load_llm():
         await asyncio.sleep(5)
         elapsed = int(time.time() - t0)
         try:
-            r = await llm_client.get("/health")
+            r = await llm_client.get("/v1/models")
             if r.status_code == 200:
                 service_status["llm"] = "ready"
                 log.info(f"llama.cpp ready after {elapsed}s")
