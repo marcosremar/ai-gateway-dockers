@@ -1,6 +1,7 @@
 # Ultravox Speech-to-Speech — Blackwell GPU image (RTX 5090/5080)
 #
 # Base: nvidia/cuda:12.8.1 (native Blackwell support, driver 570+)
+# Models pre-downloaded at build time (~17GB) for instant boot.
 # ENTRYPOINT reset for Vast.ai compatibility
 
 FROM nvidia/cuda:12.8.1-cudnn-devel-ubuntu22.04
@@ -47,7 +48,24 @@ RUN pip install --no-cache-dir einops onnxruntime sox && \
 
 RUN rm -rf /root/.cache/pip /tmp/pip-*
 
-ENV HF_HOME=/app/.cache/huggingface HF_HUB_ENABLE_HF_TRANSFER=1
+ENV HF_HOME=/app/.cache/huggingface \
+    HF_HUB_ENABLE_HF_TRANSFER=1 \
+    HUGGINGFACE_HUB_CACHE=/app/.cache/huggingface/hub
+
+# ── Pre-download models at build time ──
+# This avoids 16GB+ downloads at runtime (which cause OOM kills on Vast.ai).
+# HF_TOKEN is needed for gated Llama-3.1-8B (used inside Ultravox).
+ARG HF_TOKEN
+RUN mkdir -p /app/.cache/huggingface && \
+    HF_TOKEN=${HF_TOKEN} python3 -c " \
+import os; os.environ['HF_TOKEN'] = os.environ.get('HF_TOKEN', ''); \
+from huggingface_hub import snapshot_download; \
+print('Downloading Ultravox (fixie-ai/ultravox-v0_6-llama-3_1-8b)...'); \
+snapshot_download('fixie-ai/ultravox-v0_6-llama-3_1-8b', cache_dir='/app/.cache/huggingface/hub'); \
+print('Downloading Qwen3-TTS...'); \
+snapshot_download('Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice', cache_dir='/app/.cache/huggingface/hub'); \
+print('Done — models cached in image.'); \
+"
 
 COPY api/ /app/api/
 COPY start.sh /app/start.sh
@@ -55,7 +73,7 @@ RUN chmod +x /app/start.sh && chmod -R 777 /app/.cache 2>/dev/null || true
 
 EXPOSE 8000
 
-HEALTHCHECK --interval=30s --timeout=10s --retries=5 \
-    CMD curl -f http://localhost:8000/health || exit 1
+# No HEALTHCHECK — Vast.ai destroys instances when healthcheck fails during
+# model loading. The /health endpoint is still available for external monitoring.
 
 CMD ["/app/start.sh"]

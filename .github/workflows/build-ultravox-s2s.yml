@@ -90,5 +90,7 @@ jobs:
           tags: |
             marcosremar/ultravox-s2s:blackwell
             ghcr.io/marcosremar/ultravox-s2s:blackwell
+          build-args: |
+            HF_TOKEN=${{ secrets.HF_TOKEN }}
           cache-from: type=gha,scope=ultravox-s2s-blackwell
           cache-to: type=gha,mode=max,scope=ultravox-s2s-blackwell
