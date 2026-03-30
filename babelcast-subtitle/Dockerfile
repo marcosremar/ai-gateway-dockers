@@ -2,8 +2,8 @@
 # Single image for ALL GPU architectures: Blackwell (sm_120), Ada (sm_89),
 # Ampere (sm_80/86), Hopper (sm_90). No separate Blackwell variant needed.
 #
-# CUDA 12.8.1 is the minimum for RTX 5090/5080 (sm_120) and includes kernels
-# for all older architectures. One image runs everywhere.
+# CUDA 12.8.1 runtime is the minimum for RTX 5090/5080 (sm_120).
+# llama-cpp-python uses cu124 pre-built wheel (forward-compatible with 12.8).
 #
 # LLM: TranslateGemma 4B Q8_0 via llama.cpp (flash_attn + n_batch=1024)
 # STT: Faster Whisper large-v3-turbo via CTranslate2
@@ -23,7 +23,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     N_UBATCH=512 \
     FLASH_ATTN=true
 
-# System deps — minimal for inference only (no build tools needed)
+# System deps — minimal for inference only
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.11 python3.11-venv python3.11-dev python3-pip \
     ffmpeg libsndfile1 curl && \
@@ -36,8 +36,15 @@ WORKDIR /app
 ARG CUDA_INDEX=https://download.pytorch.org/whl/cu128
 RUN pip install --no-cache-dir torch==2.11.0 --index-url ${CUDA_INDEX}
 
-# Step 2: llama-cpp-python — installed at runtime in start.sh using pre-built CUDA wheel.
-# Cannot install at build time because buildx platform detection prevents finding the right wheel.
+# Step 2: llama-cpp-python — download pre-built cu124 wheel directly (no compilation).
+# cu124 wheel is forward-compatible with CUDA 12.8 runtime (NVIDIA minor version compat).
+# Direct curl download bypasses pip index resolution issues.
+ARG LLAMA_CPP_VERSION=0.3.19
+RUN curl -L -o /tmp/llama_cpp_python.whl \
+    "https://github.com/abetlen/llama-cpp-python/releases/download/v${LLAMA_CPP_VERSION}-cu124/llama_cpp_python-${LLAMA_CPP_VERSION}-cp311-cp311-linux_x86_64.whl" && \
+    pip install --no-cache-dir /tmp/llama_cpp_python.whl && \
+    pip install --no-cache-dir llama-cpp-python[server] && \
+    rm /tmp/llama_cpp_python.whl
 
 # Step 3: Everything else from PyPI
 RUN pip install --no-cache-dir \
