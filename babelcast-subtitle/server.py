@@ -110,6 +110,15 @@ async def _load_llm():
         log.error(f"GGUF download failed: {e}")
         return
 
+    # Verify llama_cpp is importable
+    try:
+        import llama_cpp as _lc
+        log.info(f"llama-cpp-python version: {_lc.__version__}")
+    except ImportError as e:
+        service_status["llm"] = f"import_failed: {e}"
+        log.error(f"llama-cpp-python not installed: {e}")
+        return
+
     # Start llama.cpp server subprocess
     service_status["llm"] = "starting"
     cmd = [
@@ -124,7 +133,7 @@ async def _load_llm():
     if FLASH_ATTN:
         cmd += ["--flash_attn", "true"]
 
-    log.info(f"Starting llama.cpp: flash_attn={FLASH_ATTN}, n_batch={N_BATCH}, n_ctx={N_CTX}")
+    log.info(f"Starting llama.cpp: {' '.join(cmd[-8:])}")
     try:
         with open("/tmp/llama.log", "w") as log_f:
             subprocess.Popen(cmd, stdout=log_f, stderr=subprocess.STDOUT)
@@ -133,20 +142,43 @@ async def _load_llm():
         log.error(f"Failed to start llama.cpp: {e}")
         return
 
-    # Poll until ready (up to 5 min)
+    # Poll until ready — 15 min timeout (large models need time for first load + CUDA warmup)
+    LLM_TIMEOUT_S = int(os.environ.get("LLM_TIMEOUT_S", "900"))
     llm_client = httpx.AsyncClient(base_url=f"http://127.0.0.1:{LLM_PORT}", timeout=10.0)
-    for attempt in range(60):
-        await asyncio.sleep(3 if attempt < 10 else 5)
+    t0 = time.time()
+    attempt = 0
+    while (time.time() - t0) < LLM_TIMEOUT_S:
+        attempt += 1
+        await asyncio.sleep(5)
+        elapsed = int(time.time() - t0)
         try:
             r = await llm_client.get("/health")
             if r.status_code == 200:
                 service_status["llm"] = "ready"
-                log.info(f"llama.cpp ready after {attempt * 3}s")
+                log.info(f"llama.cpp ready after {elapsed}s")
                 return
         except Exception:
             pass
-    service_status["llm"] = "failed: timeout"
-    log.error("llama.cpp failed to start within timeout")
+        # Log progress every 30s
+        if attempt % 6 == 0:
+            llama_log = ""
+            try:
+                with open("/tmp/llama.log") as f:
+                    llama_log = f.read()[-200:]
+            except Exception:
+                pass
+            service_status["llm"] = f"starting ({elapsed}s)"
+            log.info(f"llama.cpp still starting ({elapsed}s)... {llama_log.strip()[-80:]}")
+
+    # Timeout — capture log for debugging
+    llama_log = ""
+    try:
+        with open("/tmp/llama.log") as f:
+            llama_log = f.read()[-500:]
+    except Exception:
+        pass
+    service_status["llm"] = f"failed: timeout ({LLM_TIMEOUT_S}s)"
+    log.error(f"llama.cpp failed to start within {LLM_TIMEOUT_S}s. Last log: {llama_log}")
 
 
 # ── App ──────────────────────────────────────────────────────────────────────
@@ -173,6 +205,24 @@ async def health():
             "stt": {"warm": service_status["whisper"] == "loaded"},
             "llm": {"warm": service_status["llm"] == "ready"},
         },
+    }
+
+
+@app.get("/debug")
+async def debug():
+    """Debug endpoint — returns llama.cpp subprocess logs and system info."""
+    llama_log = ""
+    try:
+        with open("/tmp/llama.log") as f:
+            llama_log = f.read()[-2000:]
+    except Exception:
+        llama_log = "no log file"
+    return {
+        "services": service_status,
+        "llama_log": llama_log,
+        "uptime": round(time.time() - boot_time, 1),
+        "device": DEVICE,
+        "gpu": torch.cuda.get_device_name(0) if DEVICE == "cuda" else None,
     }
 
 
