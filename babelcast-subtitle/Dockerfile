@@ -2,10 +2,6 @@
 # Single image for ALL GPU architectures: Blackwell (sm_120), Ada (sm_89),
 # Ampere (sm_80/86), Hopper (sm_90). No separate Blackwell variant needed.
 #
-# Build:
-#   docker build -t marcosremar/babelcast-subtitle:latest .
-#   docker build --build-arg BASE_IMAGE=nvidia/cuda:13.0.2-cudnn-runtime-ubuntu22.04 -t ... .
-#
 # CUDA 12.8.1 is the minimum for RTX 5090/5080 (sm_120) and includes kernels
 # for all older architectures. One image runs everywhere.
 #
@@ -20,7 +16,6 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     COMPUTE_TYPE=float16 \
-    # LLM defaults — override via env at runtime
     LLM_REPO=bullerwins/translategemma-4b-it-GGUF \
     LLM_FILENAME=translategemma-4b-it-Q8_0.gguf \
     N_CTX=1024 \
@@ -28,24 +23,25 @@ ENV DEBIAN_FRONTEND=noninteractive \
     N_UBATCH=512 \
     FLASH_ATTN=true
 
-# System deps — minimal for inference only
+# System deps — minimal for inference only (no build tools needed)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.11 python3.11-venv python3.11-dev python3-pip \
-    build-essential cmake \
     ffmpeg libsndfile1 curl && \
     ln -sf /usr/bin/python3.11 /usr/bin/python3 && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Install Python deps
-# - llama-cpp-python: installed at RUNTIME in start.sh (needs CUDA toolkit on GPU host)
-# - faster-whisper: CTranslate2-based STT (4.7.1+ has Blackwell fixes)
-# - httpx: async HTTP client for llama.cpp subprocess communication
-ARG CUDA_INDEX=https://download.pytorch.org/whl/cu128
 # Step 1: PyTorch from CUDA 12.8 index
+ARG CUDA_INDEX=https://download.pytorch.org/whl/cu128
 RUN pip install --no-cache-dir torch==2.11.0 --index-url ${CUDA_INDEX}
-# Step 2: Everything else from PyPI (faster-whisper, ctranslate2, etc.)
+
+# Step 2: llama-cpp-python pre-built CUDA wheel (no compilation needed)
+ARG LLAMA_INDEX=https://abetlen.github.io/llama-cpp-python/whl/cu128
+RUN pip install --no-cache-dir \
+    "llama-cpp-python[server]>=0.3.19" --extra-index-url ${LLAMA_INDEX}
+
+# Step 3: Everything else from PyPI
 RUN pip install --no-cache-dir \
     "faster-whisper>=1.2.1" \
     "ctranslate2>=4.7.1" \
