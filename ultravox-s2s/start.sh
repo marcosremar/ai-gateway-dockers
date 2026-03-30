@@ -38,6 +38,13 @@ fi
 echo "Arch:     $GPU_ARCH"
 
 # ── PyTorch CUDA Optimization ────────────────────────────────────────────────
+# Skip all Python/torch imports on pre-built images — they add 1-2 min of overhead
+# before uvicorn starts and cause the health check proxy to return 404 too long.
+
+if [ -f /app/.prebuilt ]; then
+    echo "Pre-built image — skipping PyTorch CUDA check and upgrade (cu128 already installed)"
+    CUDA_OK="Pre-built: assuming CUDA OK (cu128)"
+else
 
 CURRENT_CUDA=$(python3 -c "import torch; print(torch.version.cuda)" 2>/dev/null || echo "none")
 echo "PyTorch CUDA: $CURRENT_CUDA"
@@ -91,6 +98,8 @@ if echo "$CUDA_OK" | grep -q "FAILED"; then
     echo "Minimum driver: 525+ for cu124, 570+ for cu128"
     echo "Continuing anyway (server will report error via /health)..."
 fi
+
+fi  # end of non-prebuilt block
 
 # ── HuggingFace Setup ────────────────────────────────────────────────────────
 
