@@ -113,9 +113,16 @@ fi
 ln -sfn /app/.cache/huggingface /workspace/huggingface 2>/dev/null || true
 
 # ── Ensure TTS deps ──────────────────────────────────────────────────────────
+# Skip pip install when running on a pre-built image (marker /app/.prebuilt exists).
+# Pre-built images (Dockerfile.blackwell) have all deps pre-installed — installing
+# again wastes 2-5 min and can fail on slow/no-internet hosts.
 
-pip install --no-cache-dir -q "transformers>=4.45.0" "accelerate>=1.12.0" librosa einops onnxruntime sox 2>&1 | tail -3
-pip install --no-cache-dir -q --no-deps "faster-qwen3-tts>=0.2.4" 2>&1 | tail -3
+if [ -f /app/.prebuilt ]; then
+    echo "Pre-built image detected — skipping pip install (deps already installed)"
+else
+    pip install --no-cache-dir -q "transformers>=4.45.0" "accelerate>=1.12.0" librosa einops onnxruntime sox 2>&1 | tail -3
+    pip install --no-cache-dir -q --no-deps "faster-qwen3-tts>=0.2.4" 2>&1 | tail -3
+fi
 
 # ── Start Server ─────────────────────────────────────────────────────────────
 

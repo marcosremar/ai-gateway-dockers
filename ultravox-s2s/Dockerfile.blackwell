@@ -63,7 +63,9 @@ RUN mkdir -p /app/.cache/huggingface && \
 COPY download_models.py /app/download_models.py
 COPY api/ /app/api/
 COPY start.sh /app/start.sh
-RUN chmod +x /app/start.sh && chmod -R 777 /app/.cache 2>/dev/null || true
+# Marker: tells start.sh to skip pip install (everything pre-installed in this image)
+RUN touch /app/.prebuilt && \
+    chmod +x /app/start.sh && chmod -R 777 /app/.cache 2>/dev/null || true
 
 EXPOSE 8000
 
