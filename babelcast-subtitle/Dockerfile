@@ -40,11 +40,10 @@ RUN pip install --no-cache-dir torch==2.11.0 --index-url ${CUDA_INDEX}
 # cu124 wheel is forward-compatible with CUDA 12.8 runtime (NVIDIA minor version compat).
 # Direct curl download bypasses pip index resolution issues.
 ARG LLAMA_CPP_VERSION=0.3.19
-RUN curl -L -o /tmp/llama_cpp_python.whl \
+RUN curl -L -o /tmp/llama_cpp_python-${LLAMA_CPP_VERSION}-cp311-cp311-linux_x86_64.whl \
     "https://github.com/abetlen/llama-cpp-python/releases/download/v${LLAMA_CPP_VERSION}-cu124/llama_cpp_python-${LLAMA_CPP_VERSION}-cp311-cp311-linux_x86_64.whl" && \
-    pip install --no-cache-dir /tmp/llama_cpp_python.whl && \
-    pip install --no-cache-dir llama-cpp-python[server] && \
-    rm /tmp/llama_cpp_python.whl
+    pip install --no-cache-dir "/tmp/llama_cpp_python-${LLAMA_CPP_VERSION}-cp311-cp311-linux_x86_64.whl[server]" && \
+    rm /tmp/llama_cpp_python-*.whl
 
 # Step 3: Everything else from PyPI
 RUN pip install --no-cache-dir \
