@@ -45,6 +45,7 @@ RUN pip install --no-cache-dir \
     "ctranslate2>=4.7.1" \
     httpx \
     huggingface-hub \
+    python-multipart \
     uvicorn[standard] \
     fastapi
 
