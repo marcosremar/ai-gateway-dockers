@@ -36,10 +36,8 @@ WORKDIR /app
 ARG CUDA_INDEX=https://download.pytorch.org/whl/cu128
 RUN pip install --no-cache-dir torch==2.11.0 --index-url ${CUDA_INDEX}
 
-# Step 2: llama-cpp-python pre-built CUDA wheel (no compilation needed)
-ARG LLAMA_INDEX=https://abetlen.github.io/llama-cpp-python/whl/cu128
-RUN pip install --no-cache-dir \
-    "llama-cpp-python[server]>=0.3.19" --extra-index-url ${LLAMA_INDEX}
+# Step 2: llama-cpp-python — installed at runtime in start.sh using pre-built CUDA wheel.
+# Cannot install at build time because buildx platform detection prevents finding the right wheel.
 
 # Step 3: Everything else from PyPI
 RUN pip install --no-cache-dir \
