@@ -56,17 +56,11 @@ ENV HF_HOME=/app/.cache/huggingface \
 # This avoids 16GB+ downloads at runtime (which cause OOM kills on Vast.ai).
 # HF_TOKEN is needed for gated Llama-3.1-8B (used inside Ultravox).
 ARG HF_TOKEN
+COPY download_models.py /tmp/download_models.py
 RUN mkdir -p /app/.cache/huggingface && \
-    HF_TOKEN=${HF_TOKEN} python3 -c " \
-import os; os.environ['HF_TOKEN'] = os.environ.get('HF_TOKEN', ''); \
-from huggingface_hub import snapshot_download; \
-print('Downloading Ultravox (fixie-ai/ultravox-v0_6-llama-3_1-8b)...'); \
-snapshot_download('fixie-ai/ultravox-v0_6-llama-3_1-8b', cache_dir='/app/.cache/huggingface/hub'); \
-print('Downloading Qwen3-TTS...'); \
-snapshot_download('Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice', cache_dir='/app/.cache/huggingface/hub'); \
-print('Done — models cached in image.'); \
-"
+    HF_TOKEN=${HF_TOKEN} python3 /tmp/download_models.py
 
+COPY download_models.py /app/download_models.py
 COPY api/ /app/api/
 COPY start.sh /app/start.sh
 RUN chmod +x /app/start.sh && chmod -R 777 /app/.cache 2>/dev/null || true

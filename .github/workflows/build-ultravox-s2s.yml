@@ -45,9 +45,7 @@ jobs:
           context: ultravox-s2s
           file: ultravox-s2s/Dockerfile
           push: true
-          tags: |
-            marcosremar/ultravox-s2s:latest
-            ghcr.io/marcosremar/ultravox-s2s:latest
+          tags: marcosremar/ultravox-s2s:latest
           cache-from: type=gha,scope=ultravox-s2s
           cache-to: type=gha,mode=max,scope=ultravox-s2s
 
@@ -87,9 +85,7 @@ jobs:
           context: ultravox-s2s
           file: ultravox-s2s/Dockerfile.blackwell
           push: true
-          tags: |
-            marcosremar/ultravox-s2s:blackwell
-            ghcr.io/marcosremar/ultravox-s2s:blackwell
+          tags: marcosremar/ultravox-s2s:blackwell
           build-args: |
             HF_TOKEN=${{ secrets.HF_TOKEN }}
           cache-from: type=gha,scope=ultravox-s2s-blackwell
