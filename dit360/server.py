@@ -58,7 +58,7 @@ def _should_offload() -> bool:
         return False
     # auto: offload if VRAM < 40GB
     if DEVICE == "cuda":
-        vram_gb = torch.cuda.get_device_properties(0).total_mem / (1024 ** 3)
+        vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
         log.info(f"VRAM: {vram_gb:.1f}GB — offload={'yes' if vram_gb < 40 else 'no'}")
         return vram_gb < 40
     return False
@@ -119,7 +119,7 @@ async def health():
         "uptime": round(time.time() - boot_time, 1),
         "device": DEVICE,
         "gpu": torch.cuda.get_device_name(0) if DEVICE == "cuda" else None,
-        "vram_gb": round(torch.cuda.get_device_properties(0).total_mem / (1024 ** 3), 1) if DEVICE == "cuda" else None,
+        "vram_gb": round(torch.cuda.get_device_properties(0).total_memory / (1024 ** 3), 1) if DEVICE == "cuda" else None,
         "services": service_status,
         "model_warmth": {
             "pipeline": {"warm": service_status["pipeline"] == "ready"},
@@ -265,6 +265,6 @@ if __name__ == "__main__":
     log.info(f"Starting DiT360 server on :{port}")
     if DEVICE == "cuda":
         log.info(f"GPU: {torch.cuda.get_device_name(0)}")
-        vram = torch.cuda.get_device_properties(0).total_mem / (1024 ** 3)
+        vram = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
         log.info(f"VRAM: {vram:.1f}GB, CPU offload: {CPU_OFFLOAD}")
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
