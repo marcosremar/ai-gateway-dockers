@@ -34,7 +34,7 @@ WORKDIR /app
 
 # Step 1: PyTorch from CUDA 12.8 index
 ARG CUDA_INDEX=https://download.pytorch.org/whl/cu128
-RUN pip install --no-cache-dir torch==2.6.0 torchvision==0.21.0 --index-url ${CUDA_INDEX}
+RUN pip install --no-cache-dir torch==2.11.0 torchvision --index-url ${CUDA_INDEX}
 
 # Step 2: Diffusers (from git for latest FLUX support) + deps
 RUN pip install --no-cache-dir \
