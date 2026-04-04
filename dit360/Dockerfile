@@ -36,7 +36,7 @@ WORKDIR /app
 ARG CUDA_INDEX=https://download.pytorch.org/whl/cu128
 RUN pip install --no-cache-dir torch==2.11.0 torchvision --index-url ${CUDA_INDEX}
 
-# Step 2: Diffusers (from git for latest FLUX support) + deps
+# Step 2: Diffusers (from git for latest FLUX support) + deps + Real-ESRGAN for 8K upscale
 RUN pip install --no-cache-dir \
     "diffusers[torch]>=0.32.0" \
     "transformers>=4.48.0" \
@@ -50,7 +50,10 @@ RUN pip install --no-cache-dir \
     fastapi \
     python-multipart \
     httpx \
-    Pillow
+    Pillow \
+    realesrgan \
+    basicsr \
+    gfpgan
 
 # Step 3: Pre-download LoRA weights (small, ~200MB) into HF cache.
 # FLUX.1-dev base model (~24GB fp16) is too large for CI runners,

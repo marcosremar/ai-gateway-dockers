@@ -3,6 +3,7 @@ DiT360 Server — 360° Panoramic Image Generation via FLUX.1-dev + LoRA
 
 Generates high-quality equirectangular panoramic images (1024×2048) from text
 prompts. Built on FLUX.1-dev (12B) with DiT360 LoRA fine-tune.
+Supports 4x upscale via Real-ESRGAN for 8K output (4096×8192).
 
 VRAM: ~37GB without offload, ~22GB with enable_model_cpu_offload().
 CPU_OFFLOAD env var: "auto" (default) = offload if <40GB VRAM, "on", "off".
@@ -10,7 +11,7 @@ CPU_OFFLOAD env var: "auto" (default) = offload if <40GB VRAM, "on", "off".
 Endpoints:
   GET  /health              — Service status + model readiness
   GET  /version             — Image version info
-  POST /v1/images/generate  — Generate panoramic image from text prompt
+  POST /v1/images/generate  — Generate panoramic image (supports upscale param)
 """
 
 import os
@@ -43,10 +44,12 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 # ── Global state ────────────────────────────────────────────────────────────
 
 pipe = None
+upscaler = None
 boot_time = time.time()
 
 service_status = {
     "pipeline": "pending",
+    "upscaler": "pending",
 }
 
 
@@ -102,11 +105,43 @@ async def _load_pipeline():
         log.error(f"Pipeline load failed: {e}", exc_info=True)
 
 
+async def _load_upscaler():
+    """Load Real-ESRGAN 4x upscaler model."""
+    global upscaler
+    try:
+        service_status["upscaler"] = "loading"
+        log.info("Loading Real-ESRGAN 4x upscaler...")
+
+        def _load():
+            from realesrgan import RealESRGANer
+            from basicsr.archs.rrdbnet_arch import RRDBNet
+
+            model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=4)
+            return RealESRGANer(
+                scale=4,
+                model_path="https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth",
+                model=model,
+                tile=400,  # Tile size for large images (prevents OOM)
+                tile_pad=10,
+                pre_pad=0,
+                half=True,  # fp16 for speed
+                device="cuda" if DEVICE == "cuda" else "cpu",
+            )
+
+        upscaler = await asyncio.to_thread(_load)
+        service_status["upscaler"] = "ready"
+        log.info("Real-ESRGAN 4x upscaler ready")
+    except Exception as e:
+        service_status["upscaler"] = f"error: {e}"
+        log.error(f"Upscaler load failed: {e}", exc_info=True)
+
+
 # ── App ──────────────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     asyncio.create_task(_load_pipeline())
+    asyncio.create_task(_load_upscaler())
     yield
 
 app = FastAPI(title="DiT360", lifespan=lifespan)
@@ -123,6 +158,7 @@ async def health():
         "services": service_status,
         "model_warmth": {
             "pipeline": {"warm": service_status["pipeline"] == "ready"},
+            "upscaler": {"warm": service_status["upscaler"] == "ready"},
         },
     }
 
@@ -131,7 +167,7 @@ async def health():
 async def version():
     cap = torch.cuda.get_device_capability() if DEVICE == "cuda" else (0, 0)
     return {
-        "version": "dit360-1.0",
+        "version": "dit360-1.1",
         "type": "image-generation",
         "cuda_arch": f"sm_{cap[0] * 10 + cap[1]}",
         "models": {"base": MODEL_ID, "lora": LORA_ID},
@@ -181,6 +217,8 @@ async def generate_image(request: Request):
         num_inference_steps (int): Diffusion steps, default 28
         guidance_scale (float): Classifier-free guidance, default 2.8
         seed (int|null): Random seed for reproducibility, default null (random)
+        upscale (int): Upscale factor (1=none, 2=2x, 4=4x via Real-ESRGAN). Default 1.
+                       4x turns 2048x1024 into 8192x4096 (8K).
         response_format (str): "b64_json" (default) or "raw" (returns PNG directly)
 
     Returns:
@@ -199,7 +237,13 @@ async def generate_image(request: Request):
     steps = body.get("num_inference_steps", DEFAULT_STEPS)
     guidance = body.get("guidance_scale", DEFAULT_GUIDANCE)
     seed = body.get("seed")
+    upscale_factor = body.get("upscale", 1)
     response_format = body.get("response_format", "b64_json")
+
+    if upscale_factor not in (1, 2, 4):
+        return JSONResponse(status_code=400, content={"error": "upscale must be 1, 2, or 4"})
+    if upscale_factor > 1 and (upscaler is None or service_status["upscaler"] != "ready"):
+        return JSONResponse(status_code=503, content={"error": "Upscaler not ready yet", "status": service_status})
 
     # Prepend panorama hint if not already present
     full_prompt = prompt if "panorama" in prompt.lower() else f"This is a panorama. {prompt}"
@@ -228,8 +272,31 @@ async def generate_image(request: Request):
         log.error(f"Generation failed: {e}", exc_info=True)
         return JSONResponse(status_code=500, content={"error": f"Generation failed: {e}"})
 
-    latency_ms = round((time.time() - t0) * 1000)
-    log.info(f"Generated in {latency_ms}ms")
+    gen_ms = round((time.time() - t0) * 1000)
+    log.info(f"Generated in {gen_ms}ms")
+
+    # Upscale if requested
+    upscale_ms = 0
+    if upscale_factor > 1:
+        import numpy as np
+        t1 = time.time()
+        log.info(f"Upscaling {upscale_factor}x with Real-ESRGAN...")
+
+        def _upscale():
+            img_np = np.array(image)
+            output, _ = upscaler.enhance(img_np, outscale=upscale_factor)
+            from PIL import Image as PILImage
+            return PILImage.fromarray(output)
+
+        try:
+            image = await asyncio.to_thread(_upscale)
+            upscale_ms = round((time.time() - t1) * 1000)
+            log.info(f"Upscaled to {image.size[0]}x{image.size[1]} in {upscale_ms}ms")
+        except Exception as e:
+            log.error(f"Upscale failed: {e}", exc_info=True)
+            return JSONResponse(status_code=500, content={"error": f"Upscale failed: {e}"})
+
+    latency_ms = gen_ms + upscale_ms
 
     # Encode to PNG
     buf = io.BytesIO()
@@ -242,6 +309,9 @@ async def generate_image(request: Request):
             "X-Seed": str(seed),
         })
 
+    # Final dimensions (after upscale)
+    final_w, final_h = image.size
+
     # Default: b64_json (OpenAI-style)
     return {
         "data": [{
@@ -249,12 +319,17 @@ async def generate_image(request: Request):
         }],
         "model": "dit360",
         "prompt": full_prompt,
-        "width": width,
-        "height": height,
+        "width": final_w,
+        "height": final_h,
+        "base_width": width,
+        "base_height": height,
+        "upscale": upscale_factor,
         "steps": steps,
         "guidance_scale": guidance,
         "seed": seed,
         "latency_ms": latency_ms,
+        "generation_ms": gen_ms,
+        "upscale_ms": upscale_ms,
     }
 
 
