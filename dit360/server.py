@@ -145,6 +145,29 @@ async def version():
     }
 
 
+# ── Debug Endpoint ──────────────────────────────────────────────────────────
+
+LOG_FILE = os.environ.get("LOG_FILE", "/tmp/container.log")
+
+@app.get("/debug/logs")
+async def debug_logs(lines: int = 200):
+    """Return recent container logs for post-mortem debugging.
+    Logs are captured by start.sh via tee to LOG_FILE."""
+    try:
+        with open(LOG_FILE) as f:
+            all_lines = f.readlines()
+        tail = all_lines[-lines:]
+        return {
+            "total_lines": len(all_lines),
+            "returned_lines": len(tail),
+            "uptime": round(time.time() - boot_time, 1),
+            "services": service_status,
+            "logs": "".join(tail),
+        }
+    except FileNotFoundError:
+        return {"error": f"Log file {LOG_FILE} not found", "services": service_status}
+
+
 # ── Image Generation Endpoint ──────────────────────────────────────────────
 
 @app.post("/v1/images/generate")
