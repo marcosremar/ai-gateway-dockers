@@ -113,6 +113,11 @@ async def _load_upscaler():
         log.info("Loading Real-ESRGAN 4x upscaler...")
 
         def _load():
+            # Patch basicsr's broken import before importing realesrgan
+            import torchvision.transforms.functional as TF
+            import sys
+            sys.modules['torchvision.transforms.functional_tensor'] = TF
+
             from realesrgan import RealESRGANer
             from basicsr.archs.rrdbnet_arch import RRDBNet
 

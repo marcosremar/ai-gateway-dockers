@@ -52,8 +52,8 @@ RUN pip install --no-cache-dir \
     httpx \
     Pillow \
     realesrgan \
-    basicsr \
-    gfpgan
+    "basicsr>=1.4.2" \
+    opencv-python-headless
 
 # Step 3: Pre-download LoRA weights (small, ~200MB) into HF cache.
 # FLUX.1-dev base model (~24GB fp16) is too large for CI runners,
