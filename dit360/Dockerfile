@@ -26,7 +26,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # System deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.11 python3.11-venv python3.11-dev python3-pip \
-    curl git && \
+    curl git libxcb1 libgl1-mesa-glx libglib2.0-0 && \
     ln -sf /usr/bin/python3.11 /usr/bin/python3 && \
     rm -rf /var/lib/apt/lists/*
 
