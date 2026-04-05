@@ -1,0 +1,45 @@
+# AI Gateway Server — Fly.io Configuration
+#
+# Deploy: fly deploy --dockerfile backend/Dockerfile
+# Region: Paris CDG (lowest latency for France)
+#
+# Scaling:
+#   - 0 machines when idle (scale-to-zero, ~$0.15/month storage only)
+#   - Auto-starts on first request (~1-2s cold start)
+#   - Scales up to 10 machines under load
+#   - Machines stay alive while WebSocket connections exist
+
+app = "parle-gateway"
+primary_region = "cdg"
+kill_signal = "SIGTERM"
+kill_timeout = 30
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  SPEECH_GATEWAY_PORT = "5050"
+
+[http_service]
+  internal_port = 5050
+  force_https = true
+  # Scale-to-zero: stop machines when no traffic
+  auto_stop_machines = "stop"
+  # Auto-start on first request
+  auto_start_machines = true
+  # Allow ALL machines to stop (true scale-to-zero)
+  min_machines_running = 0
+
+[http_service.concurrency]
+  # Use "connections" for WebSocket (not "requests")
+  type = "connections"
+  # At 100 concurrent WS connections → scale up new machine
+  soft_limit = 100
+  # At 200 connections → reject new ones (HTTP 503)
+  hard_limit = 200
+
+[[vm]]
+  # Cheapest: shared-cpu-1x 512MB = ~$3.50/month running 24/7
+  # With scale-to-zero: <$1/month for hobby usage
+  size = "shared-cpu-1x"
+  memory = "512mb"
