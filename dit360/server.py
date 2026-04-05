@@ -147,16 +147,20 @@ async def _load_upscaler():
 async def lifespan(app: FastAPI):
     asyncio.create_task(_load_pipeline())
     asyncio.create_task(_load_upscaler())
+    try:
+        from idle_watchdog import start_watchdog
+        asyncio.create_task(start_watchdog())
+    except Exception as e:
+        log.warning(f"Idle watchdog not started: {e}")
     yield
 
 app = FastAPI(title="DiT360", lifespan=lifespan)
 
-# Install container-level idle watchdog (auto-stops pod after IDLE_TIMEOUT_MIN)
 try:
-    from idle_watchdog import install_idle_watchdog
-    install_idle_watchdog(app)
+    from idle_watchdog import add_idle_middleware
+    add_idle_middleware(app)
 except Exception as e:
-    log.warning(f"Idle watchdog not installed: {e}")
+    log.warning(f"Idle middleware not installed: {e}")
 
 
 @app.get("/health")
