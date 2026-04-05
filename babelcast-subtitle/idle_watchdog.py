@@ -46,11 +46,20 @@ def add_idle_middleware(app):
     from starlette.middleware.base import BaseHTTPMiddleware
     from starlette.requests import Request
 
+    # Paths that do NOT count as user activity (health polls, internal llm checks)
+    EXCLUDED_PATHS = frozenset([
+        "/health", "/version", "/debug", "/debug/logs",
+        "/v1/models",  # llama.cpp internal model list
+        "/docs", "/openapi.json", "/favicon.ico",
+    ])
+
     class IdleTrackingMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request: Request, call_next):
             path = request.url.path
-            if path not in ("/health", "/version", "/debug", "/debug/logs"):
+            # Only external model requests count (STT, LLM, TTS, pipeline)
+            if path not in EXCLUDED_PATHS and not path.startswith("/docs"):
                 touch_activity()
+                log.debug(f"[idle-watchdog] Activity: {request.method} {path}")
             return await call_next(request)
 
     app.add_middleware(IdleTrackingMiddleware)
@@ -64,12 +73,13 @@ async def start_watchdog():
         return
 
     timeout_s = IDLE_TIMEOUT_MIN * 60
-    log.info(f"[idle-watchdog] Started — auto-exit after {IDLE_TIMEOUT_MIN} min idle")
+    log.warning(f"[idle-watchdog] Started — auto-exit after {IDLE_TIMEOUT_MIN} min idle (check every {CHECK_INTERVAL_S}s)")
     warned = False
 
     while True:
         await asyncio.sleep(CHECK_INTERVAL_S)
         idle_s = idle_seconds()
+        log.warning(f"[idle-watchdog] Check: idle {idle_s:.0f}s / {timeout_s}s ({idle_s/timeout_s*100:.0f}%)")
 
         if idle_s >= timeout_s:
             log.warning(f"[idle-watchdog] Idle {idle_s/60:.0f} min — shutting down")
