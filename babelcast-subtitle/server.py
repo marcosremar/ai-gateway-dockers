@@ -191,6 +191,13 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="BabelCast Subtitle", lifespan=lifespan)
 
+# Install container-level idle watchdog (auto-stops pod after IDLE_TIMEOUT_MIN)
+try:
+    from idle_watchdog import install_idle_watchdog
+    install_idle_watchdog(app)
+except Exception as e:
+    log.warning(f"Idle watchdog not installed: {e}")
+
 
 @app.get("/health")
 async def health():

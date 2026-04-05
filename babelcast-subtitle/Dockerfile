@@ -61,6 +61,7 @@ RUN python3 -c "from huggingface_hub import hf_hub_download; \
     || echo "GGUF pre-download skipped (will download at boot)"
 
 COPY server.py .
+COPY idle_watchdog.py .
 COPY start.sh .
 RUN chmod +x start.sh
 

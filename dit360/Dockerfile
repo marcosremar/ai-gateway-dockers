@@ -66,6 +66,7 @@ snapshot_download('Insta360-Research/DiT360-Panorama-Image-Generation')" \
     || echo "LoRA pre-download skipped (will download at boot)"
 
 COPY server.py .
+COPY idle_watchdog.py .
 COPY start.sh .
 RUN chmod +x start.sh
 
