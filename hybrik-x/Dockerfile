@@ -1,6 +1,4 @@
-# ── Stage 1: build ────────────────────────────────────────────────────────────
-# Use devel image only for compilation (Cython extensions in HybrIK + pycocotools).
-FROM nvidia/cuda:12.1.0-cudnn8-devel-ubuntu22.04 AS builder
+FROM nvidia/cuda:12.1.0-cudnn8-devel-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
@@ -14,7 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN ln -sf /usr/bin/python3.10 /usr/bin/python && \
     ln -sf /usr/bin/pip3 /usr/bin/pip
 
-# PyTorch 2.1 + CUDA 12.1 (shares layers with babelcast on Vast.ai hosts)
+# PyTorch 2.1 + CUDA 12.1 — shares base layers with babelcast on Vast.ai hosts
 RUN pip install --no-cache-dir \
     torch==2.1.2+cu121 torchvision==0.16.2+cu121 \
     --extra-index-url https://download.pytorch.org/whl/cu121
@@ -23,7 +21,7 @@ RUN pip install --no-cache-dir \
 RUN git clone https://github.com/jeffffffli/HybrIK.git /app/HybrIK
 WORKDIR /app/HybrIK
 
-# Python deps (install before HybrIK so Cython compiles with correct numpy)
+# Python deps
 RUN pip install --no-cache-dir \
     "numpy<2" scipy opencv-python-headless tqdm easydict pyyaml \
     cython pycocotools matplotlib six terminaltables chumpy \
@@ -42,32 +40,8 @@ RUN mkdir -p /app/HybrIK/pretrained_models && \
     gdown 1R0WbySXs_vceygKg_oWeLMNAZCEoCadG \
     -O /app/HybrIK/pretrained_models/hybrikx_rle_hrnet.pth
 
-# Pre-download FasterRCNN weights so startup doesn't need internet access
-# (torchvision downloads to ~/.cache/torch/hub/checkpoints/ at first use)
-RUN python3 -c "from torchvision.models.detection import fasterrcnn_resnet50_fpn; fasterrcnn_resnet50_fpn(pretrained=True)" \
-    && echo "FasterRCNN weights cached"
-
-# ── Stage 2: runtime ───────────────────────────────────────────────────────────
-# Use runtime-only image — ~3GB smaller than devel base.
-FROM nvidia/cuda:12.1.0-cudnn8-runtime-ubuntu22.04
-
-ENV DEBIAN_FRONTEND=noninteractive
-ENV PYTHONUNBUFFERED=1
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.10 python3-pip \
-    ffmpeg libgl1-mesa-glx libglib2.0-0 \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN ln -sf /usr/bin/python3.10 /usr/bin/python && \
-    ln -sf /usr/bin/pip3 /usr/bin/pip
-
-# Copy everything from builder
-COPY --from=builder /usr/local/lib/python3.10 /usr/local/lib/python3.10
-COPY --from=builder /usr/local/bin /usr/local/bin
-COPY --from=builder /app /app
-# Copy pre-downloaded model weights cache (FasterRCNN etc.)
-COPY --from=builder /root/.cache /root/.cache
+# Pre-bake FasterRCNN weights so startup doesn't need internet (~167MB from pytorch.org)
+RUN python3 -c "from torchvision.models.detection import fasterrcnn_resnet50_fpn; fasterrcnn_resnet50_fpn(pretrained=True); print('FasterRCNN weights cached')"
 
 # Copy server code
 COPY server.py /app/server.py
