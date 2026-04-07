@@ -13,17 +13,22 @@ ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 DEBIAN_FRONTEND=noninteractive
 WORKDIR /app
 
 # ── Python 3.11 + system deps ──
+# aria2 + zstd: multi-connection downloads (~30% faster than curl/single-stream)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     software-properties-common && \
     add-apt-repository -y ppa:deadsnakes/ppa && \
     apt-get update && apt-get install -y --no-install-recommends \
     python3.11 python3.11-dev python3.11-venv python3-pip \
-    ffmpeg libsndfile1 sox libsox-dev curl \
+    ffmpeg libsndfile1 sox libsox-dev curl aria2 zstd \
     libgomp1 libsndfile1-dev \
     && ln -sf /usr/bin/python3.11 /usr/local/bin/python3 \
     && ln -sf /usr/bin/python3.11 /usr/local/bin/python \
     && python3 -m pip install --no-cache-dir --upgrade pip \
     && rm -rf /var/lib/apt/lists/*
+
+# Install hf-download helper (aria2c-based, with HF Hub fallback)
+COPY hf-download /usr/local/bin/hf-download
+RUN chmod +x /usr/local/bin/hf-download
 
 # ── PyTorch (CUDA 12.8 — native Blackwell) ──
 RUN pip3 install --no-cache-dir torch torchvision torchaudio \
@@ -35,10 +40,13 @@ RUN pip install --no-cache-dir \
     peft librosa soundfile numpy scipy
 
 # ── Web framework ──
+# hf_xet replaces the deprecated hf_transfer for HF Hub downloads; see the
+# HF_XET_HIGH_PERFORMANCE + HF_XET_FIXED_DOWNLOAD_CONCURRENCY env vars below
+# for the tuning. Benchmark on Vast.ai RTX 4090 (2026-04-07): +24% vs legacy.
 RUN pip install --no-cache-dir \
     "fastapi>=0.115.0" "uvicorn[standard]>=0.32.0" \
     python-multipart httpx websockets \
-    "huggingface-hub>=0.26.0" hf_transfer \
+    "huggingface-hub>=1.0.0" "hf_xet>=1.4.0" \
     "pydantic-settings>=2.0" \
     "aiortc>=1.9.0" av
 
@@ -49,8 +57,9 @@ RUN pip install --no-cache-dir einops onnxruntime sox && \
 RUN rm -rf /root/.cache/pip /tmp/pip-*
 
 ENV HF_HOME=/app/.cache/huggingface \
-    HF_HUB_ENABLE_HF_TRANSFER=1 \
-    HUGGINGFACE_HUB_CACHE=/app/.cache/huggingface/hub
+    HUGGINGFACE_HUB_CACHE=/app/.cache/huggingface/hub \
+    HF_XET_HIGH_PERFORMANCE=1 \
+    HF_XET_FIXED_DOWNLOAD_CONCURRENCY=50
 
 # ── Pre-download models at build time ──
 # This avoids 16GB+ downloads at runtime (which cause OOM kills on Vast.ai).

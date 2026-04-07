@@ -24,11 +24,14 @@ image = (
     )
     .pip_install(
         "transformers==4.57.3", "accelerate>=1.12.0",
-        "soundfile", "numpy", "huggingface-hub", "hf_transfer",
+        "soundfile", "numpy", "huggingface-hub>=1.0.0", "hf_xet>=1.4.0",
         "librosa", "einops", "onnxruntime", "sox",
     )
     .run_commands("pip install --no-deps 'qwen-tts>=0.1.1' 'faster-qwen3-tts>=0.2.1'")
-    .env({"HF_HUB_ENABLE_HF_TRANSFER": "1"})
+    .env({
+        "HF_XET_HIGH_PERFORMANCE": "1",
+        "HF_XET_FIXED_DOWNLOAD_CONCURRENCY": "50",
+    })
 )
 
 

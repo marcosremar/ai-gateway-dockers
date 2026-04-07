@@ -12,10 +12,15 @@ ENV PYTHONDONTWRITEBYTECODE=1
 WORKDIR /app
 
 # ── System dependencies ──
+# aria2 + zstd: multi-connection downloads (~30% faster than curl/single-stream)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ffmpeg libsndfile1 sox libsox-dev curl \
+    ffmpeg libsndfile1 sox libsox-dev curl aria2 zstd \
     libgomp1 libsndfile1-dev \
     && rm -rf /var/lib/apt/lists/*
+
+# Install hf-download helper (aria2c-based, with HF Hub fallback)
+COPY hf-download /usr/local/bin/hf-download
+RUN chmod +x /usr/local/bin/hf-download
 
 # ── PyTorch (CUDA 12.4) ──
 RUN pip3 install --no-cache-dir --upgrade torch torchvision torchaudio \
@@ -27,10 +32,11 @@ RUN pip install --no-cache-dir \
     peft librosa soundfile numpy scipy
 
 # ── Web framework ──
+# hf_xet replaces the deprecated hf_transfer — see HF_XET_* env vars below.
 RUN pip install --no-cache-dir \
     "fastapi>=0.115.0" "uvicorn[standard]>=0.32.0" \
     python-multipart httpx websockets \
-    "huggingface-hub>=0.26.0" hf_transfer \
+    "huggingface-hub>=1.0.0" "hf_xet>=1.4.0" \
     "pydantic-settings>=2.0" \
     "aiortc>=1.9.0" av
 
@@ -40,7 +46,9 @@ RUN pip install --no-cache-dir einops onnxruntime sox && \
 
 RUN rm -rf /root/.cache/pip /tmp/pip-*
 
-ENV HF_HOME=/app/.cache/huggingface HF_HUB_ENABLE_HF_TRANSFER=1
+ENV HF_HOME=/app/.cache/huggingface \
+    HF_XET_HIGH_PERFORMANCE=1 \
+    HF_XET_FIXED_DOWNLOAD_CONCURRENCY=50
 
 COPY api/ /app/api/
 COPY start.sh /app/start.sh

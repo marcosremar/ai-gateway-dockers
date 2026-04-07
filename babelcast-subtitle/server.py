@@ -90,14 +90,26 @@ async def _load_stt():
 
 
 async def _load_llm():
-    """Download GGUF model, start llama.cpp subprocess, wait for ready."""
+    """Download GGUF model, start llama.cpp subprocess, wait for ready.
+
+    Download priority:
+      1. HF cache (try_to_load_from_cache — instant if pre-baked)
+      2. hf_hub_download with hf-xet tuned for datacenter networks
+         (bench: 394 MB/s avg on Vast.ai RTX 4090, +24% vs legacy hf_transfer).
+         Env vars are normally set in the Dockerfile but we set them here too
+         as a safety for non-Docker runs.
+    """
     global llm_client
     try:
         service_status["llm"] = "downloading"
         log.info(f"Downloading GGUF: {LLM_REPO}/{LLM_FILENAME}...")
 
+        # hf-xet high-performance tuning (no-op if already set by Dockerfile)
+        os.environ.setdefault("HF_XET_HIGH_PERFORMANCE", "1")
+        os.environ.setdefault("HF_XET_FIXED_DOWNLOAD_CONCURRENCY", "50")
+
         from huggingface_hub import hf_hub_download, try_to_load_from_cache
-        # Fast path: check cache first
+        # Fast path: check cache first (pre-baked in Docker image)
         cached = await asyncio.to_thread(try_to_load_from_cache, LLM_REPO, LLM_FILENAME)
         if cached:
             gguf_path = cached

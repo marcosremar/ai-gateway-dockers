@@ -106,7 +106,14 @@ fi  # end of non-prebuilt block
 echo ""
 export HF_HOME="/app/.cache/huggingface"
 export HUGGINGFACE_HUB_CACHE="/app/.cache/huggingface/hub"
-export HF_HUB_ENABLE_HF_TRANSFER=1
+# hf-xet tuning — benchmarked on Vast.ai RTX 4090 (64GB RAM, 3 runs, 2026-04-07):
+# HP + FIXED_CONCURRENCY=50 = 394 MB/s avg (+24% vs legacy hf_transfer, 11% spread).
+# HP mode requires >=64GB RAM — skip if host has less.
+export HF_XET_FIXED_DOWNLOAD_CONCURRENCY=50
+RAM_MB=$(free -m | awk '/^Mem:/{print $2}' 2>/dev/null || echo 0)
+if [ "$RAM_MB" -ge 60000 ] 2>/dev/null; then
+    export HF_XET_HIGH_PERFORMANCE=1
+fi
 mkdir -p "$HF_HOME"
 
 # Network Volume symlinks (Vast.ai, RunPod)
