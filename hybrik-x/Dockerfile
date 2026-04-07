@@ -27,6 +27,12 @@ RUN pip install --no-cache-dir \
     cython pycocotools matplotlib six terminaltables chumpy \
     joblib fastapi uvicorn python-multipart Pillow gdown
 
+# pytorch3d — required by HybrIK's lbs.py for rotation conversions (axis_angle_to_matrix etc.)
+# Pre-built wheel for py3.10 + CUDA 12.1 + PyTorch 2.1.x (--no-deps to avoid torch downgrade)
+RUN pip install --no-cache-dir --no-deps pytorch3d \
+    -f "https://dl.fbaipublicfiles.com/pytorch3d/packaging/wheels/py310_cu121_pyt210/download.html" && \
+    python3 -c "from pytorch3d.transforms.rotation_conversions import axis_angle_to_matrix, matrix_to_axis_angle; print('pytorch3d OK')"
+
 # Install HybrIK without setup.py deps (pins opencv==4.1.2 which doesn't exist for py3.10)
 RUN pip install --no-cache-dir --no-deps -e .
 
