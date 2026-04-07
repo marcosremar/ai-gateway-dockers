@@ -6,15 +6,27 @@ gets captured in the snapshot.
 
 Usage:
     modal deploy docker/modal/babelcast.py
+
+Environment:
+    MODAL_MAX_INPUTS   — concurrent inputs per container (default: 4)
+    MODAL_PROXY_SECRET — if set, endpoints require Modal-Key/Modal-Secret headers
 """
+
+import os
 
 import modal
 
 app = modal.App("babelcast")
 
+vol = modal.Volume.from_name("babelcast-models", create_if_missing=True)
+
 image = (
     modal.Image.from_registry("marcosremar/babelcast-translategemma:latest")
-    .env({"HF_HUB_ENABLE_HF_TRANSFER": "1"})
+    .env({
+        # hf-xet (new default) — benchmarked at +24% vs deprecated hf_transfer
+        "HF_XET_HIGH_PERFORMANCE": "1",
+        "HF_XET_FIXED_DOWNLOAD_CONCURRENCY": "50",
+    })
     .run_commands(
         "pip uninstall -y faster-qwen3-tts 2>/dev/null; echo ok",
         "pip install --no-cache-dir transformers==4.57.3 accelerate>=1.12.0 qwen-tts soundfile numpy librosa einops onnxruntime",
@@ -25,44 +37,48 @@ image = (
     .run_commands(
         "python3 -c \""
         "from huggingface_hub import snapshot_download; "
-        "snapshot_download('Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice'); "
-        "snapshot_download('Qwen/Qwen3-TTS-12Hz-0.6B-Base'); "
+        "snapshot_download('Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice', cache_dir='/models'); "
+        "snapshot_download('Qwen/Qwen3-TTS-12Hz-0.6B-Base', cache_dir='/models'); "
         "print('Both TTS models cached')\"",
     )
     .add_local_dir("docker/api", remote_path="/app/api")
     .add_local_file("docker/start.sh", remote_path="/app/start.sh")
 )
 
+MAX_INPUTS = int(os.environ.get("MODAL_MAX_INPUTS", "4"))
 
-@app.cls(
+_app_cls_kwargs: dict = dict(
     image=image,
     gpu="a10g",
     timeout=600,
     scaledown_window=300,
     enable_memory_snapshot=True,
     experimental_options={"enable_gpu_snapshot": True},
+    min_containers=1,
+    volumes={"/models": vol},
 )
-@modal.concurrent(max_inputs=4)
+
+_proxy_secret = os.environ.get("MODAL_PROXY_SECRET")
+if _proxy_secret:
+    _app_cls_kwargs["secrets"] = [modal.Secret.from_dict({"MODAL_PROXY_SECRET": _proxy_secret})]
+
+
+@app.cls(**_app_cls_kwargs)
+@modal.concurrent(max_inputs=MAX_INPUTS)
 class BabelCast:
     @modal.enter(snap=True)
     def load_models(self):
         """Load all models into GPU memory BEFORE snapshot."""
-        import subprocess, os, sys, time
+        import subprocess, sys, time
 
-        # Add api dir to path so server.py imports work
         sys.path.insert(0, "/app/api")
-        os.chdir("/app/api")
 
-        # Start llama.cpp server in background (LLM)
-        os.environ["HF_HOME"] = os.environ.get("HF_HOME", "/app/.cache/huggingface")
-        os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
-
-        # Download and start LLM (llama.cpp)
         print("[snapshot] Downloading LLM GGUF...")
         from huggingface_hub import hf_hub_download
         gguf_path = hf_hub_download(
             "bullerwins/translategemma-12b-it-GGUF",
             filename="translategemma-12b-it-Q5_K_M.gguf",
+            cache_dir="/models",
         )
         print(f"[snapshot] GGUF: {gguf_path}")
 
@@ -72,20 +88,17 @@ class BabelCast:
             "--model", gguf_path, "--n_gpu_layers", "99", "--n_ctx", "2048",
         ], stdout=open("/tmp/llama.log", "w"), stderr=subprocess.STDOUT)
 
-        # Load Whisper
         print("[snapshot] Loading Whisper...")
         from faster_whisper import WhisperModel
         self.whisper = WhisperModel("large-v3-turbo", device="cuda")
         print("[snapshot] Whisper loaded")
 
-        # Load TTS (both models)
         print("[snapshot] Loading TTS models...")
         from services.tts import TTSService
         self.tts = TTSService("Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice", "cuda:0")
         self.tts.load()
         print("[snapshot] TTS loaded (CustomVoice + Base)")
 
-        # Warm up TTS (triggers CUDA kernel compilation)
         print("[snapshot] Warming up TTS...")
         try:
             self.tts.synthesize("Hello", "English", "Ryan")
@@ -93,7 +106,6 @@ class BabelCast:
         except Exception as e:
             print(f"[snapshot] TTS warmup error: {e}")
 
-        # Wait for llama.cpp
         import urllib.request
         for i in range(60):
             try:
@@ -115,7 +127,5 @@ class BabelCast:
         """Return the FastAPI app — models already loaded from snapshot."""
         import sys
         sys.path.insert(0, "/app/api")
-
-        # Import the FastAPI app (it uses get_tts/get_whisper dependency injection)
         from server import app as fastapi_app
         return fastapi_app

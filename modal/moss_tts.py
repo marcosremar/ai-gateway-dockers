@@ -6,11 +6,17 @@ Uses transformers AutoModel/AutoProcessor API with a simple /api/text endpoint.
 Usage:
     modal deploy docker/modal/moss_tts.py
 
+Environment:
+    MODAL_MAX_INPUTS   — concurrent inputs per container (default: 1)
+    MODAL_PROXY_SECRET — if set, endpoints require Modal-Key/Modal-Secret headers
+
 Endpoints:
     GET  /health       — health check
     POST /api/text     — simple TTS: { text, language?, temperature?, top_p?, top_k?, reference_audio? }
                          returns: { audio (base64 WAV), sample_rate, duration_seconds, generation_time }
 """
+
+import os
 
 import modal
 
@@ -18,25 +24,36 @@ app = modal.App("babelcast-moss-tts")
 
 image = (
     modal.Image.from_registry("nvidia/cuda:12.8.0-devel-ubuntu22.04", add_python="3.12")
-    .env({"HF_HUB_ENABLE_HF_TRANSFER": "1"})
+    .env({
+        "HF_XET_HIGH_PERFORMANCE": "1",
+        "HF_XET_FIXED_DOWNLOAD_CONCURRENCY": "50",
+    })
     .apt_install("ffmpeg", "libsndfile1", "git", "curl")
     .run_commands(
-        # Upgrade pip first (old pip can't parse PEP 508 markers in MOSS-TTS)
         "pip install --upgrade pip setuptools wheel",
-        # Install PyTorch + torchaudio for CUDA 12.8
         "pip install --no-cache-dir torch torchaudio --index-url https://download.pytorch.org/whl/cu128",
-        # Clone and install MOSS-TTS
         "git clone --depth 1 https://github.com/OpenMOSS/MOSS-TTS.git /opt/moss-tts",
         "cd /opt/moss-tts && pip install --no-cache-dir -e .",
-        # Install FastAPI server deps
-        "pip install --no-cache-dir 'fastapi>=0.115.0' 'uvicorn[standard]>=0.32.0' python-multipart soundfile numpy hf_transfer",
-        # Install transformers for AutoModel/AutoProcessor
+        "pip install --no-cache-dir 'fastapi>=0.115.0' 'uvicorn[standard]>=0.32.0' python-multipart soundfile numpy 'huggingface-hub>=1.0.0' 'hf_xet>=1.4.0'",
         "pip install --no-cache-dir transformers accelerate",
-        # Pre-download model weights
         "python3 -c 'from huggingface_hub import snapshot_download; snapshot_download(\"OpenMOSS-Team/MOSS-TTS\")'",
         "echo 'moss-tts-v1'",
     )
 )
+
+MAX_INPUTS = int(os.environ.get("MODAL_MAX_INPUTS", "1"))
+
+_func_kwargs: dict = dict(
+    image=image,
+    gpu="L40S",
+    timeout=600,
+    scaledown_window=300,
+    min_containers=1,
+)
+
+_proxy_secret = os.environ.get("MODAL_PROXY_SECRET")
+if _proxy_secret:
+    _func_kwargs["secrets"] = [modal.Secret.from_dict({"MODAL_PROXY_SECRET": _proxy_secret})]
 
 # Wrapper server script using transformers AutoModel/AutoProcessor API
 wrapper_server = """

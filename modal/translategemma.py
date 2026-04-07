@@ -8,15 +8,26 @@ Usage:
     modal deploy docker/modal/translategemma.py
 
 Requires: CONF_GROQ_API_KEY secret in Modal (for initial Groq fallback)
+
+Environment:
+    MODAL_MAX_INPUTS   — concurrent inputs per container (default: 4)
+    MODAL_PROXY_SECRET — if set, endpoints require Modal-Key/Modal-Secret headers
 """
+
+import os
 
 import modal
 
 app = modal.App("babelcast-translategemma")
 
+vol = modal.Volume.from_name("babelcast-models", create_if_missing=True)
+
 image = (
     modal.Image.from_registry("marcosremar/babelcast-translategemma:latest")
-    .env({"HF_HUB_ENABLE_HF_TRANSFER": "1"})
+    .env({
+        "HF_XET_HIGH_PERFORMANCE": "1",
+        "HF_XET_FIXED_DOWNLOAD_CONCURRENCY": "50",
+    })
     .run_commands(
         "pip uninstall -y faster-qwen3-tts 2>/dev/null; echo ok",
         "pip install --no-cache-dir transformers==4.57.3 accelerate>=1.12.0 qwen-tts soundfile numpy librosa einops onnxruntime",
@@ -27,50 +38,61 @@ image = (
     .run_commands(
         "python3 -c \""
         "from huggingface_hub import snapshot_download; "
-        "snapshot_download('Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice'); "
-        "snapshot_download('Qwen/Qwen3-TTS-12Hz-0.6B-Base'); "
+        "snapshot_download('Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice', cache_dir='/models'); "
+        "snapshot_download('Qwen/Qwen3-TTS-12Hz-0.6B-Base', cache_dir='/models'); "
         "print('TTS models cached')\"",
     )
     .run_commands(
-        # Pre-download TranslateGemma GGUF (~7GB) into image layer
         "python3 -c \""
         "from huggingface_hub import hf_hub_download; "
         "hf_hub_download('bullerwins/translategemma-12b-it-GGUF', "
-        "filename='translategemma-12b-it-Q5_K_M.gguf'); "
+        "filename='translategemma-12b-it-Q5_K_M.gguf', cache_dir='/models'); "
         "print('TranslateGemma GGUF cached')\"",
     )
     .add_local_dir("docker/api", remote_path="/app/api")
     .add_local_file("docker/start-babelcast-translategemma-only-subtitles.sh", remote_path="/app/start.sh")
 )
 
+MAX_INPUTS = int(os.environ.get("MODAL_MAX_INPUTS", "4"))
 
-@app.cls(
+_app_cls_kwargs: dict = dict(
     image=image,
     gpu="A10G",
     timeout=900,
     scaledown_window=300,
     enable_memory_snapshot=True,
     experimental_options={"enable_gpu_snapshot": True},
+    min_containers=1,
+    volumes={"/models": vol},
 )
-@modal.concurrent(max_inputs=4)
+
+_proxy_secret = os.environ.get("MODAL_PROXY_SECRET")
+if _proxy_secret:
+    _app_cls_kwargs["secrets"] = [modal.Secret.from_dict({"MODAL_PROXY_SECRET": _proxy_secret})]
+
+
+@app.cls(**_app_cls_kwargs)
+@modal.concurrent(max_inputs=MAX_INPUTS)
 class BabelCastTranslateGemma:
 
     @modal.enter(snap=True)
     def setup_snapshot(self):
         """Load all models to GPU before snapshot."""
-        import subprocess, os, sys, time
+        import subprocess, sys, time
 
         sys.path.insert(0, "/app/api")
+        import os
         os.chdir("/app/api")
         os.environ["HF_HOME"] = os.environ.get("HF_HOME", "/app/.cache/huggingface")
-        os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
+        os.environ.setdefault("HF_XET_HIGH_PERFORMANCE", "1")
+        os.environ.setdefault("HF_XET_FIXED_DOWNLOAD_CONCURRENCY", "50")
 
-        # Start llama.cpp with TranslateGemma
         print("[snapshot] Starting llama.cpp with TranslateGemma...")
         from huggingface_hub import hf_hub_download
         gguf_path = hf_hub_download(
             "bullerwins/translategemma-12b-it-GGUF",
             filename="translategemma-12b-it-Q5_K_M.gguf",
+            cache_dir="/models",
         )
         self.llama_proc = subprocess.Popen([
             sys.executable, "-m", "llama_cpp.server",
@@ -78,25 +100,21 @@ class BabelCastTranslateGemma:
             "--model", gguf_path, "--n_gpu_layers", "99", "--n_ctx", "2048",
         ], stdout=open("/tmp/llama.log", "w"), stderr=subprocess.STDOUT)
 
-        # Load Whisper
         print("[snapshot] Loading Whisper...")
         from faster_whisper import WhisperModel
         self.whisper = WhisperModel("large-v3-turbo", device="cuda")
 
-        # Load TTS
         print("[snapshot] Loading TTS...")
         from services.tts import TTSService
         self.tts = TTSService("Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice", "cuda:0")
         self.tts.load()
 
-        # Warm up TTS
         try:
             self.tts.synthesize("Hello", "English", "Ryan")
             print("[snapshot] TTS warmup OK")
         except Exception as e:
             print(f"[snapshot] TTS warmup error: {e}")
 
-        # Wait for llama.cpp
         import urllib.request
         for i in range(60):
             try:

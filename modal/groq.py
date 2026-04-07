@@ -5,11 +5,19 @@ Smaller footprint, faster boot — no llama.cpp, no GGUF download.
 
 Usage:
     modal deploy docker/modal/groq.py
+
+Environment:
+    MODAL_MAX_INPUTS   — concurrent inputs per container (default: 4)
+    MODAL_PROXY_SECRET — if set, endpoints require Modal-Key/Modal-Secret headers
 """
+
+import os
 
 import modal
 
 app = modal.App("babelcast-groq")
+
+vol = modal.Volume.from_name("babelcast-models", create_if_missing=True)
 
 image = (
     modal.Image.debian_slim(python_version="3.11")
@@ -22,7 +30,7 @@ image = (
         "faster-whisper>=1.1.0",
         "fastapi>=0.115.0", "uvicorn[standard]>=0.32.0",
         "python-multipart", "httpx", "soundfile", "numpy",
-        "huggingface-hub>=0.26.0", "hf_transfer",
+        "huggingface-hub>=1.0.0", "hf_xet>=1.4.0",
         "pydantic-settings>=2.0", "websockets",
     )
     .pip_install(
@@ -35,12 +43,11 @@ image = (
         "find / -name '*.pyc' -path '*/qwen_tts/*' -delete 2>/dev/null; echo ok",
     )
     .pip_install("speechbrain")
-    # Pre-cache models
     .run_commands(
         "python3 -c \""
         "from huggingface_hub import snapshot_download; "
-        "snapshot_download('Systran/faster-whisper-large-v3-turbo'); "
-        "snapshot_download('Qwen/Qwen3-TTS-12Hz-0.6B-Base'); "
+        "snapshot_download('Systran/faster-whisper-large-v3-turbo', cache_dir='/models'); "
+        "snapshot_download('Qwen/Qwen3-TTS-12Hz-0.6B-Base', cache_dir='/models'); "
         "print('Models cached')\"",
         "python3 -c \""
         "from speechbrain.inference.speaker import EncoderClassifier; "
@@ -51,16 +58,26 @@ image = (
     .add_local_file("docker/start-groq.sh", remote_path="/app/start-groq.sh")
 )
 
+MAX_INPUTS = int(os.environ.get("MODAL_MAX_INPUTS", "4"))
 
-@app.cls(
+_app_cls_kwargs: dict = dict(
     image=image,
     gpu="A10G",
     timeout=900,
     scaledown_window=300,
     enable_memory_snapshot=True,
     experimental_options={"enable_gpu_snapshot": True},
+    min_containers=1,
+    volumes={"/models": vol},
 )
-@modal.concurrent(max_inputs=4)
+
+_proxy_secret = os.environ.get("MODAL_PROXY_SECRET")
+if _proxy_secret:
+    _app_cls_kwargs["secrets"] = [modal.Secret.from_dict({"MODAL_PROXY_SECRET": _proxy_secret})]
+
+
+@app.cls(**_app_cls_kwargs)
+@modal.concurrent(max_inputs=MAX_INPUTS)
 class BabelCastGroq:
 
     @modal.enter(snap=True)
@@ -71,27 +88,23 @@ class BabelCastGroq:
         os.chdir("/app/api")
         os.environ["HF_HOME"] = os.environ.get("HF_HOME", "/app/.cache/huggingface")
 
-        # Load Whisper
         print("[snapshot] Loading Whisper...")
         from faster_whisper import WhisperModel
         self.whisper = WhisperModel("large-v3-turbo", device="cuda")
         print("[snapshot] Whisper loaded")
 
-        # Load TTS
         print("[snapshot] Loading TTS...")
         from services.tts import TTSService
         self.tts = TTSService("Qwen/Qwen3-TTS-12Hz-0.6B-Base", "cuda:0")
         self.tts.load()
         print("[snapshot] TTS loaded")
 
-        # Warm up TTS
         try:
             self.tts.synthesize("Hello", "English", "Ryan")
             print("[snapshot] TTS warmup OK")
         except Exception as e:
             print(f"[snapshot] TTS warmup error: {e}")
 
-        # Load speaker verification
         print("[snapshot] Loading speaker verification...")
         from speechbrain.inference.speaker import EncoderClassifier
         self.speaker_model = EncoderClassifier.from_hparams(
