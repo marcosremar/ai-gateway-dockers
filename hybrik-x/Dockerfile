@@ -42,6 +42,11 @@ RUN mkdir -p /app/HybrIK/pretrained_models && \
     gdown 1R0WbySXs_vceygKg_oWeLMNAZCEoCadG \
     -O /app/HybrIK/pretrained_models/hybrikx_rle_hrnet.pth
 
+# Pre-download FasterRCNN weights so startup doesn't need internet access
+# (torchvision downloads to ~/.cache/torch/hub/checkpoints/ at first use)
+RUN python3 -c "from torchvision.models.detection import fasterrcnn_resnet50_fpn; fasterrcnn_resnet50_fpn(pretrained=True)" \
+    && echo "FasterRCNN weights cached"
+
 # ── Stage 2: runtime ───────────────────────────────────────────────────────────
 # Use runtime-only image — ~3GB smaller than devel base.
 FROM nvidia/cuda:12.1.0-cudnn8-runtime-ubuntu22.04
@@ -61,6 +66,8 @@ RUN ln -sf /usr/bin/python3.10 /usr/bin/python && \
 COPY --from=builder /usr/local/lib/python3.10 /usr/local/lib/python3.10
 COPY --from=builder /usr/local/bin /usr/local/bin
 COPY --from=builder /app /app
+# Copy pre-downloaded model weights cache (FasterRCNN etc.)
+COPY --from=builder /root/.cache /root/.cache
 
 # Copy server code
 COPY server.py /app/server.py
