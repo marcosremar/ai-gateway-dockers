@@ -1,33 +1,35 @@
-FROM nvidia/cuda:11.8.0-cudnn8-devel-ubuntu22.04
+# ── Stage 1: build ────────────────────────────────────────────────────────────
+# Use devel image only for compilation (Cython extensions in HybrIK + pycocotools).
+FROM nvidia/cuda:12.1.0-cudnn8-devel-ubuntu22.04 AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.10 python3.10-dev python3-pip \
     git wget curl ffmpeg libgl1-mesa-glx libglib2.0-0 unzip \
+    build-essential g++ \
     && rm -rf /var/lib/apt/lists/*
 
-RUN ln -sf /usr/bin/python3.10 /usr/bin/python
+RUN ln -sf /usr/bin/python3.10 /usr/bin/python && \
+    ln -sf /usr/bin/pip3 /usr/bin/pip
 
-# PyTorch 2.0.1 + CUDA 11.8
+# PyTorch 2.1 + CUDA 12.1 (shares layers with babelcast on Vast.ai hosts)
 RUN pip install --no-cache-dir \
-    torch==2.0.1+cu118 torchvision==0.15.2+cu118 \
-    --extra-index-url https://download.pytorch.org/whl/cu118
+    torch==2.1.2+cu121 torchvision==0.16.2+cu121 \
+    --extra-index-url https://download.pytorch.org/whl/cu121
 
 # Clone HybrIK
-WORKDIR /app
 RUN git clone https://github.com/jeffffffli/HybrIK.git /app/HybrIK
 WORKDIR /app/HybrIK
 
-# Python deps
+# Python deps (install before HybrIK so Cython compiles with correct numpy)
 RUN pip install --no-cache-dir \
-    numpy scipy opencv-python-headless tqdm easydict pyyaml \
+    "numpy<2" scipy opencv-python-headless tqdm easydict pyyaml \
     cython pycocotools matplotlib six terminaltables chumpy \
     joblib fastapi uvicorn python-multipart Pillow gdown
 
-# Install HybrIK without setup.py (it pins opencv-python==4.1.2.30 which doesn't exist for py3.10)
-# We already installed opencv-python-headless above, so just add HybrIK to the path
+# Install HybrIK without setup.py deps (pins opencv==4.1.2 which doesn't exist for py3.10)
 RUN pip install --no-cache-dir --no-deps -e .
 
 # Download model files (SMPL-X body model + kid template)
@@ -40,14 +42,30 @@ RUN mkdir -p /app/HybrIK/pretrained_models && \
     gdown 1R0WbySXs_vceygKg_oWeLMNAZCEoCadG \
     -O /app/HybrIK/pretrained_models/hybrikx_rle_hrnet.pth
 
+# ── Stage 2: runtime ───────────────────────────────────────────────────────────
+# Use runtime-only image — ~3GB smaller than devel base.
+FROM nvidia/cuda:12.1.0-cudnn8-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.10 python3-pip \
+    ffmpeg libgl1-mesa-glx libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN ln -sf /usr/bin/python3.10 /usr/bin/python && \
+    ln -sf /usr/bin/pip3 /usr/bin/pip
+
+# Copy everything from builder
+COPY --from=builder /usr/local/lib/python3.10 /usr/local/lib/python3.10
+COPY --from=builder /usr/local/bin /usr/local/bin
+COPY --from=builder /app /app
+
 # Copy server code
 COPY server.py /app/server.py
 COPY start.sh /app/start.sh
 RUN chmod +x /app/start.sh
-
-# Vast.ai PyWorker (optional — only needed for vast.ai Serverless)
-# RUN pip install --no-cache-dir vastai-sdk
-# COPY worker.py /app/worker.py
 
 EXPOSE 8000
 
