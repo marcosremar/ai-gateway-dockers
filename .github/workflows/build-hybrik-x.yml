@@ -1,0 +1,59 @@
+name: Build hybrik-x Docker image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "hybrik-x/**"
+      - ".github/workflows/build-hybrik-x.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache /usr/local/share/boost /usr/share/swift \
+            /usr/local/graalvm /usr/local/share/chromium /usr/local/share/powershell \
+            /usr/local/.ghcup /opt/az /usr/share/miniconda /usr/local/go \
+            /usr/local/julia* /usr/local/sqlpackage /opt/microsoft /usr/local/aws-cli
+          sudo apt-get purge -y -qq firefox google-chrome-stable \
+            microsoft-edge-stable dotnet* aspnetcore* 2>/dev/null || true
+          sudo apt-get autoremove -y -qq && sudo apt-get clean
+          docker system prune -af
+          echo "Free space:" && df -h /
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: hybrik-x
+          file: hybrik-x/Dockerfile
+          push: true
+          tags: |
+            marcosremar/hybrik-x:latest
+            marcosremar/hybrik-x:${{ github.sha }}
+            ghcr.io/marcosremar/hybrik-x:latest
+            ghcr.io/marcosremar/hybrik-x:${{ github.sha }}
+          cache-from: type=gha,scope=hybrik-x
+          cache-to: type=gha,mode=max,scope=hybrik-x
