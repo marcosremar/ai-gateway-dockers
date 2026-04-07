@@ -26,7 +26,9 @@ RUN pip install --no-cache-dir \
     cython pycocotools matplotlib six terminaltables chumpy \
     joblib fastapi uvicorn python-multipart Pillow gdown
 
-RUN pip install -e .
+# Install HybrIK without setup.py (it pins opencv-python==4.1.2.30 which doesn't exist for py3.10)
+# We already installed opencv-python-headless above, so just add HybrIK to the path
+RUN pip install --no-cache-dir --no-deps -e .
 
 # Download model files (SMPL-X body model + kid template)
 RUN gdown 1un9yAGlGjDooPwlnwFpJrbGHRiLaBNzV -O /tmp/model_files.zip && \
