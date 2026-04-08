@@ -59,7 +59,10 @@ RUN rm -rf /root/.cache/pip /tmp/pip-*
 ENV HF_HOME=/app/.cache/huggingface \
     HUGGINGFACE_HUB_CACHE=/app/.cache/huggingface/hub \
     HF_XET_HIGH_PERFORMANCE=1 \
-    HF_XET_FIXED_DOWNLOAD_CONCURRENCY=50
+    HF_XET_FIXED_DOWNLOAD_CONCURRENCY=50 \
+    TORCHINDUCTOR_CACHE_DIR=/workspace/.torch-cache \
+    TORCHINDUCTOR_FX_GRAPH_CACHE=1 \
+    TORCHINDUCTOR_AUTOGRAD_CACHE=1
 
 # ── Pre-download models at build time ──
 # This avoids 16GB+ downloads at runtime (which cause OOM kills on Vast.ai).
@@ -70,6 +73,7 @@ RUN mkdir -p /app/.cache/huggingface && \
     HF_TOKEN=${HF_TOKEN} python3 /tmp/download_models.py
 
 COPY download_models.py /app/download_models.py
+COPY coldstart.py /app/coldstart.py
 COPY api/ /app/api/
 COPY start.sh /app/start.sh
 # Marker: tells start.sh to skip pip install (everything pre-installed in this image)

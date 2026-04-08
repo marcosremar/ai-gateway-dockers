@@ -23,7 +23,10 @@ ENV DEBIAN_FRONTEND=noninteractive \
     DEFAULT_HEIGHT=1024 \
     CPU_OFFLOAD=auto \
     HF_XET_HIGH_PERFORMANCE=1 \
-    HF_XET_FIXED_DOWNLOAD_CONCURRENCY=50
+    HF_XET_FIXED_DOWNLOAD_CONCURRENCY=50 \
+    TORCHINDUCTOR_CACHE_DIR=/workspace/.torch-cache \
+    TORCHINDUCTOR_FX_GRAPH_CACHE=1 \
+    TORCHINDUCTOR_AUTOGRAD_CACHE=1
 
 # System deps
 # aria2 + zstd: multi-connection downloads (~30% faster than curl/single-stream)
@@ -76,6 +79,7 @@ snapshot_download('Insta360-Research/DiT360-Panorama-Image-Generation', max_work
     || echo "LoRA pre-download skipped (will download at boot)"
 
 COPY server.py .
+COPY coldstart.py .
 COPY idle_watchdog.py .
 COPY start.sh .
 RUN chmod +x start.sh

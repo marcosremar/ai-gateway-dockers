@@ -48,8 +48,12 @@ RUN rm -rf /root/.cache/pip /tmp/pip-*
 
 ENV HF_HOME=/app/.cache/huggingface \
     HF_XET_HIGH_PERFORMANCE=1 \
-    HF_XET_FIXED_DOWNLOAD_CONCURRENCY=50
+    HF_XET_FIXED_DOWNLOAD_CONCURRENCY=50 \
+    TORCHINDUCTOR_CACHE_DIR=/workspace/.torch-cache \
+    TORCHINDUCTOR_FX_GRAPH_CACHE=1 \
+    TORCHINDUCTOR_AUTOGRAD_CACHE=1
 
+COPY coldstart.py /app/coldstart.py
 COPY api/ /app/api/
 COPY start.sh /app/start.sh
 RUN chmod +x /app/start.sh && chmod -R 777 /app/.cache 2>/dev/null || true

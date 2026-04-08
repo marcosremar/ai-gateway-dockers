@@ -116,6 +116,20 @@ if [ "$RAM_MB" -ge 60000 ] 2>/dev/null; then
 fi
 mkdir -p "$HF_HOME"
 
+# torch.compile cache — validated 4.7-5.7x faster compile on warm cache
+# (test on Mac CPU, expected ~5-15s saved on real CUDA Inductor + Triton).
+# Persist on /workspace if mounted (RunPod network volume) — survives pod
+# restarts so the cache is amortized across many sessions.
+if [ -d /workspace ]; then
+    export TORCHINDUCTOR_CACHE_DIR=/workspace/.torch-cache
+else
+    export TORCHINDUCTOR_CACHE_DIR=/app/.torch-cache
+fi
+export TORCHINDUCTOR_FX_GRAPH_CACHE=1
+export TORCHINDUCTOR_AUTOGRAD_CACHE=1
+mkdir -p "$TORCHINDUCTOR_CACHE_DIR"
+echo "torch.compile cache: $TORCHINDUCTOR_CACHE_DIR"
+
 # Network Volume symlinks (Vast.ai, RunPod)
 if [ -d "/workspace/models" ] && [ ! -L "/workspace/models" ]; then
     for model_dir in /workspace/models/models--*; do

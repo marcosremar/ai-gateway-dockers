@@ -15,12 +15,22 @@ Endpoints:
 """
 
 import os
+import sys
 import io
 import time
 import base64
 import logging
 import asyncio
 from contextlib import asynccontextmanager
+
+# ── Cold-start optimizations (BEFORE torch import so cache env vars take effect) ──
+sys.path.insert(0, "/app")
+try:
+    from coldstart import bootstrap, prefetch_safetensors
+    bootstrap(torch_cache_dir=os.environ.get("TORCHINDUCTOR_CACHE_DIR", "/app/.torch-cache"))
+except ImportError:
+    print("[server] coldstart.py not found — running without optimizations", file=sys.stderr)
+    prefetch_safetensors = lambda *a, **k: 0.0  # no-op stub
 
 import torch
 import uvicorn
@@ -77,6 +87,16 @@ async def _load_pipeline():
         log.info(f"Loading DiT360 pipeline ({MODEL_ID})...")
 
         from diffusers import FluxPipeline
+
+        # Pre-warm OS page cache via sequential read of all FLUX safetensors
+        # shards (~24GB across ~15 files). Subsequent diffusers load becomes
+        # RAM-speed access. Best-effort, no-op if helper missing.
+        try:
+            t_pre = await asyncio.to_thread(prefetch_safetensors, MODEL_ID)
+            if t_pre > 0:
+                log.info(f"Prefetched FLUX safetensors in {t_pre:.1f}s")
+        except Exception as e:
+            log.warning(f"Prefetch failed (non-fatal): {e}")
 
         def _load():
             p = FluxPipeline.from_pretrained(

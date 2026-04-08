@@ -16,10 +16,20 @@ Endpoints:
   POST /v1/tts              - Text → TTS → audio
 """
 
+# ── Cold-start optimizations ────────────────────────────────────────────────
+# Run BEFORE any torch import so torch.compile picks up the cache env vars.
+import os, sys
+sys.path.insert(0, "/app")  # for coldstart.py
+try:
+    from coldstart import bootstrap, prefetch_safetensors
+    bootstrap(torch_cache_dir=os.environ.get("TORCHINDUCTOR_CACHE_DIR", "/app/.torch-cache"))
+except ImportError:
+    print("[server] coldstart.py not found — running without optimizations", file=sys.stderr)
+    prefetch_safetensors = lambda *a, **k: 0.0  # no-op stub
+
 import asyncio
 import base64
 import io
-import os
 import re
 import time
 import threading
@@ -74,6 +84,18 @@ def load_ultravox():
     global ultravox_pipe
     import transformers
     print(f"[load] Loading Ultravox: {ULTRAVOX_MODEL}...")
+
+    # Pre-warm OS page cache by sequential read of all safetensors shards.
+    # transformers' from_pretrained does many small random reads — sequential
+    # prefetch first turns the subsequent load into pure RAM-speed access.
+    # No-op if coldstart helper unavailable.
+    try:
+        t_pre = prefetch_safetensors(ULTRAVOX_MODEL)
+        if t_pre > 0:
+            print(f"[load] Prefetched Ultravox safetensors in {t_pre:.1f}s")
+    except Exception as e:
+        print(f"[load] prefetch failed (non-fatal): {e}")
+
     t0 = time.time()
     try:
         ultravox_pipe = transformers.pipeline(
