@@ -16,22 +16,20 @@ Endpoints:
   POST /v1/tts              - Text → TTS → audio
 """
 
-# ── Cold-start optimizations ────────────────────────────────────────────────
-# Run BEFORE any torch import so torch.compile picks up the cache env vars.
-# Catch ALL exceptions — never let an OPTIONAL optimization block startup.
-import os, sys
-sys.path.insert(0, "/app")  # for coldstart.py
-try:
-    from coldstart import bootstrap, prefetch_safetensors
-    bootstrap(torch_cache_dir=os.environ.get("TORCHINDUCTOR_CACHE_DIR", "/app/.torch-cache"))
-except Exception as _coldstart_err:
-    print(
-        f"[server] coldstart unavailable ({type(_coldstart_err).__name__}: "
-        f"{_coldstart_err}) — running without optimizations",
-        file=sys.stderr,
-    )
-    prefetch_safetensors = lambda *a, **k: 0.0  # no-op stub
-
+# ── Cold-start optimization env vars ────────────────────────────────────────
+# Set in Dockerfile + start.sh:
+#   TORCHINDUCTOR_CACHE_DIR, TORCHINDUCTOR_FX_GRAPH_CACHE,
+#   TORCHINDUCTOR_AUTOGRAD_CACHE, HF_XET_HIGH_PERFORMANCE,
+#   HF_XET_FIXED_DOWNLOAD_CONCURRENCY
+# These are no-ops in current production (no model uses torch.compile() and
+# downloads are pre-baked at build time) but kept as future-proofing — when
+# we eventually call torch.compile(model, mode="max-autotune"), the cache
+# will save 5-70s per cold boot. Bench measured 56ms overhead from Python-
+# side bootstrap() helper, so we set the env vars in Dockerfile/start.sh
+# instead and skip the helper at runtime. The helper still lives at
+# dockers/_common/coldstart.py for manual debug or future use.
+import os
+import sys
 import asyncio
 import base64
 import io
@@ -89,16 +87,6 @@ def load_ultravox():
     global ultravox_pipe
     import transformers
     print(f"[load] Loading Ultravox: {ULTRAVOX_MODEL}...")
-
-    # NOTE: We previously called prefetch_safetensors() here, but real GPU
-    # benchmarking on Vast.ai RTX 4090 (2026-04-08) showed it ADDED ~37ms of
-    # overhead — NVMe is fast enough that the second read from page cache
-    # doesn't beat the first read by enough to justify the extra pass.
-    # The Ultravox safetensors file is also small (~1.3 GB) so the speedup
-    # is bounded by ~0.2s even with fastsafetensors.
-    # Kept the import for forward compat but don't call it.
-    _ = prefetch_safetensors  # silence unused warning
-
     t0 = time.time()
     try:
         ultravox_pipe = transformers.pipeline(

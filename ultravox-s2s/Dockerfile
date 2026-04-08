@@ -53,7 +53,6 @@ ENV HF_HOME=/app/.cache/huggingface \
     TORCHINDUCTOR_FX_GRAPH_CACHE=1 \
     TORCHINDUCTOR_AUTOGRAD_CACHE=1
 
-COPY coldstart.py /app/coldstart.py
 COPY api/ /app/api/
 COPY start.sh /app/start.sh
 RUN chmod +x /app/start.sh && chmod -R 777 /app/.cache 2>/dev/null || true

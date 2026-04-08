@@ -23,20 +23,12 @@ import logging
 import asyncio
 from contextlib import asynccontextmanager
 
-# ── Cold-start optimizations (BEFORE torch import so cache env vars take effect) ──
-# Catch ALL exceptions — never let an OPTIONAL optimization block startup.
-sys.path.insert(0, "/app")
-try:
-    from coldstart import bootstrap, prefetch_safetensors
-    bootstrap(torch_cache_dir=os.environ.get("TORCHINDUCTOR_CACHE_DIR", "/app/.torch-cache"))
-except Exception as _coldstart_err:
-    print(
-        f"[server] coldstart unavailable ({type(_coldstart_err).__name__}: "
-        f"{_coldstart_err}) — running without optimizations",
-        file=sys.stderr,
-    )
-    prefetch_safetensors = lambda *a, **k: 0.0  # no-op stub
-
+# ── Cold-start optimization env vars ────────────────────────────────────────
+# TORCHINDUCTOR_*, HF_XET_* set in Dockerfile/start.sh — applied at process
+# start so torch.compile and huggingface_hub pick them up. See
+# dockers/_common/coldstart.py for the (opt-in) Python helper that wraps
+# these as bootstrap() — kept for manual debug, NOT auto-loaded by server.py
+# (real bench measured 56ms overhead, no benefit until we use torch.compile).
 import torch
 import uvicorn
 from fastapi import FastAPI, Request
@@ -92,13 +84,6 @@ async def _load_pipeline():
         log.info(f"Loading DiT360 pipeline ({MODEL_ID})...")
 
         from diffusers import FluxPipeline
-
-        # NOTE: prefetch_safetensors() was tested but ADDED overhead on Vast.ai
-        # RTX 4090 NVMe (real bench 2026-04-08). FLUX.1-dev is multi-shard but
-        # diffusers' loader already does parallel reads. The prefetch double-
-        # reads each shard which makes things slower. Kept the import for
-        # forward compat / slow-storage scenarios where it might still help.
-        _ = prefetch_safetensors  # silence unused warning
 
         def _load():
             p = FluxPipeline.from_pretrained(
