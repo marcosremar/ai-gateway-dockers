@@ -24,12 +24,17 @@ import asyncio
 from contextlib import asynccontextmanager
 
 # ── Cold-start optimizations (BEFORE torch import so cache env vars take effect) ──
+# Catch ALL exceptions — never let an OPTIONAL optimization block startup.
 sys.path.insert(0, "/app")
 try:
     from coldstart import bootstrap, prefetch_safetensors
     bootstrap(torch_cache_dir=os.environ.get("TORCHINDUCTOR_CACHE_DIR", "/app/.torch-cache"))
-except ImportError:
-    print("[server] coldstart.py not found — running without optimizations", file=sys.stderr)
+except Exception as _coldstart_err:
+    print(
+        f"[server] coldstart unavailable ({type(_coldstart_err).__name__}: "
+        f"{_coldstart_err}) — running without optimizations",
+        file=sys.stderr,
+    )
     prefetch_safetensors = lambda *a, **k: 0.0  # no-op stub
 
 import torch

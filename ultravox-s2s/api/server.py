@@ -18,13 +18,18 @@ Endpoints:
 
 # ── Cold-start optimizations ────────────────────────────────────────────────
 # Run BEFORE any torch import so torch.compile picks up the cache env vars.
+# Catch ALL exceptions — never let an OPTIONAL optimization block startup.
 import os, sys
 sys.path.insert(0, "/app")  # for coldstart.py
 try:
     from coldstart import bootstrap, prefetch_safetensors
     bootstrap(torch_cache_dir=os.environ.get("TORCHINDUCTOR_CACHE_DIR", "/app/.torch-cache"))
-except ImportError:
-    print("[server] coldstart.py not found — running without optimizations", file=sys.stderr)
+except Exception as _coldstart_err:
+    print(
+        f"[server] coldstart unavailable ({type(_coldstart_err).__name__}: "
+        f"{_coldstart_err}) — running without optimizations",
+        file=sys.stderr,
+    )
     prefetch_safetensors = lambda *a, **k: 0.0  # no-op stub
 
 import asyncio

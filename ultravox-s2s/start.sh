@@ -110,9 +110,13 @@ export HUGGINGFACE_HUB_CACHE="/app/.cache/huggingface/hub"
 # HP + FIXED_CONCURRENCY=50 = 394 MB/s avg (+24% vs legacy hf_transfer, 11% spread).
 # HP mode requires >=64GB RAM — skip if host has less.
 export HF_XET_FIXED_DOWNLOAD_CONCURRENCY=50
-RAM_MB=$(free -m | awk '/^Mem:/{print $2}' 2>/dev/null || echo 0)
+RAM_MB="$(free -m 2>/dev/null | awk '/^Mem:/{print $2}')"
+RAM_MB="${RAM_MB:-0}"
 if [ "$RAM_MB" -ge 60000 ] 2>/dev/null; then
     export HF_XET_HIGH_PERFORMANCE=1
+    echo "HF_XET_HIGH_PERFORMANCE=1 (host has ${RAM_MB} MB RAM)"
+else
+    echo "HF_XET_HIGH_PERFORMANCE skipped (host has ${RAM_MB} MB RAM, needs >=60000)"
 fi
 mkdir -p "$HF_HOME"
 

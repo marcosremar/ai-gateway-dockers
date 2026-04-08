@@ -117,7 +117,7 @@ def _host_ram_mb() -> int:
 
 
 def prefetch_safetensors(
-    repo_or_paths,  # str repo_id OR list[Path]
+    repo_or_paths,  # str repo_id OR list[Path] OR None
     *,
     revision: str = "main",
     allow_patterns: Optional[Iterable[str]] = ("*.safetensors",),
@@ -132,8 +132,13 @@ def prefetch_safetensors(
     By streaming the file once into /dev/null FIRST, the OS page cache holds
     everything, and the subsequent transformers load becomes purely RAM-speed.
 
-    Returns the elapsed prefetch time in seconds. Best-effort — never raises.
+    Returns the elapsed prefetch time in seconds, or 0.0 if nothing was
+    actually prefetched (no files found, all reads failed, etc.).
+    Best-effort — never raises.
     """
+    if not repo_or_paths:
+        return 0.0
+
     start = time.time()
     files: list[Path] = []
 
@@ -152,10 +157,16 @@ def prefetch_safetensors(
                     if f.endswith(".safetensors"):
                         files.append(Path(root) / f)
         except Exception as e:
-            print(f"[coldstart] prefetch resolve failed: {e}", file=sys.stderr)
+            # Strip multi-line HF error to a single short line
+            err_brief = str(e).split("\n", 1)[0][:120]
+            print(f"[coldstart] prefetch resolve failed: {err_brief}", file=sys.stderr)
             return 0.0
     else:
-        files = [Path(p) for p in repo_or_paths]
+        try:
+            files = [Path(p) for p in repo_or_paths]
+        except TypeError:
+            print(f"[coldstart] prefetch: invalid input type", file=sys.stderr)
+            return 0.0
 
     if not files:
         return 0.0
@@ -174,14 +185,17 @@ def prefetch_safetensors(
         except OSError as e:
             print(f"[coldstart] prefetch skip {f}: {e}", file=sys.stderr)
 
+    if total_bytes == 0:
+        # Nothing was actually prefetched — return 0.0 so callers can detect.
+        return 0.0
+
     elapsed = time.time() - start
     mb = total_bytes / 1024 / 1024
-    if mb > 0:
-        print(
-            f"[coldstart] prefetched {mb:.0f} MB across {len(files)} file(s) "
-            f"in {elapsed:.1f}s ({mb / elapsed:.0f} MB/s)",
-            file=sys.stderr,
-        )
+    print(
+        f"[coldstart] prefetched {mb:.0f} MB across {len(files)} file(s) "
+        f"in {elapsed:.1f}s ({mb / elapsed:.0f} MB/s)",
+        file=sys.stderr,
+    )
     return elapsed
 
 
