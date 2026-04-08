@@ -90,12 +90,24 @@ RUN pip install \
         --index-url https://download.pytorch.org/whl/cu124
 
 # ── Numpy pin (chumpy + mmcv 1.3.9 break with numpy 2.x) ────────────────────
-RUN pip install "numpy<2.0" "Cython>=0.29"
+# Also pre-install build deps that detectron2/chumpy need at build time.
+RUN pip install "numpy<2.0" "Cython>=0.29" "setuptools<70" wheel ninja
 
-# ── HaMeR + all extras (installs detectron2, chumpy, mmcv, hydra, etc.) ─────
-# `pip install -e .[all]` runs the package's own setup.py which pulls
-# detectron2 + chumpy from GitHub and installs every needed dependency.
-RUN pip install -e ".[all]"
+# ── detectron2 (special install — needs --no-build-isolation) ──────────────
+# detectron2's setup.py imports torch at build time, but pip's PEP 517
+# isolated build environment doesn't see the host torch. The fix is to
+# disable build isolation so detectron2's setup.py can `import torch`.
+# Install BEFORE hamer so hamer's `pip install -e .[all]` finds it satisfied.
+RUN pip install --no-build-isolation \
+        'git+https://github.com/facebookresearch/detectron2.git'
+
+# ── chumpy (also needs --no-build-isolation; old setup.py uses np.bool) ────
+# Pre-install from a fork that's compatible with numpy<2.
+RUN pip install --no-build-isolation \
+        'git+https://github.com/mattloper/chumpy.git'
+
+# ── HaMeR + all extras (detectron2 and chumpy already satisfied above) ─────
+RUN pip install --no-build-isolation -e ".[all]"
 
 # ── Install ViTPose submodule in editable mode ──────────────────────────────
 # HaMeR uses ViTPose for 2D pose estimation. The submodule is at
