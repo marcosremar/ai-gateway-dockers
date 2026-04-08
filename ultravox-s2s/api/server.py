@@ -90,16 +90,14 @@ def load_ultravox():
     import transformers
     print(f"[load] Loading Ultravox: {ULTRAVOX_MODEL}...")
 
-    # Pre-warm OS page cache by sequential read of all safetensors shards.
-    # transformers' from_pretrained does many small random reads — sequential
-    # prefetch first turns the subsequent load into pure RAM-speed access.
-    # No-op if coldstart helper unavailable.
-    try:
-        t_pre = prefetch_safetensors(ULTRAVOX_MODEL)
-        if t_pre > 0:
-            print(f"[load] Prefetched Ultravox safetensors in {t_pre:.1f}s")
-    except Exception as e:
-        print(f"[load] prefetch failed (non-fatal): {e}")
+    # NOTE: We previously called prefetch_safetensors() here, but real GPU
+    # benchmarking on Vast.ai RTX 4090 (2026-04-08) showed it ADDED ~37ms of
+    # overhead — NVMe is fast enough that the second read from page cache
+    # doesn't beat the first read by enough to justify the extra pass.
+    # The Ultravox safetensors file is also small (~1.3 GB) so the speedup
+    # is bounded by ~0.2s even with fastsafetensors.
+    # Kept the import for forward compat but don't call it.
+    _ = prefetch_safetensors  # silence unused warning
 
     t0 = time.time()
     try:

@@ -93,15 +93,12 @@ async def _load_pipeline():
 
         from diffusers import FluxPipeline
 
-        # Pre-warm OS page cache via sequential read of all FLUX safetensors
-        # shards (~24GB across ~15 files). Subsequent diffusers load becomes
-        # RAM-speed access. Best-effort, no-op if helper missing.
-        try:
-            t_pre = await asyncio.to_thread(prefetch_safetensors, MODEL_ID)
-            if t_pre > 0:
-                log.info(f"Prefetched FLUX safetensors in {t_pre:.1f}s")
-        except Exception as e:
-            log.warning(f"Prefetch failed (non-fatal): {e}")
+        # NOTE: prefetch_safetensors() was tested but ADDED overhead on Vast.ai
+        # RTX 4090 NVMe (real bench 2026-04-08). FLUX.1-dev is multi-shard but
+        # diffusers' loader already does parallel reads. The prefetch double-
+        # reads each shard which makes things slower. Kept the import for
+        # forward compat / slow-storage scenarios where it might still help.
+        _ = prefetch_safetensors  # silence unused warning
 
         def _load():
             p = FluxPipeline.from_pretrained(

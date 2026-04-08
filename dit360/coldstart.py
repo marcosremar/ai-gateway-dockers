@@ -5,22 +5,47 @@ These are intentionally narrow utilities (no framework, no abstractions) that
 solve specific bottlenecks measured in our own benchmarks. Drop into any
 ML server's startup sequence to opt in.
 
-Validated speedups (Vast.ai RTX 4090, 64GB RAM, 2026-04-08):
-  - torch.compile cache reuse:    4.7-5.7x faster on second boot (5s saved)
-  - fastsafetensors loader:       4.4x faster (CPU bench), 4.8-7.5x (GPU+GDS)
-  - hf-xet HP + FIXED=50:         +24% download speed
+Validated speedups (Vast.ai RTX 4090, 251GB RAM, real GPU bench 2026-04-08):
+  - hf-xet HP + FIXED=50:         +24% download speed (proven in earlier bench)
   - Whisper pre-baked at build:   eliminates ~15s runtime download
+  - torch.compile cache reuse:    1.06x (~0.3s saved) — much smaller than my
+                                  Mac CPU test predicted (had been 4.7x). On
+                                  CUDA, Inductor codegen is lighter, cache
+                                  size is tiny (~8 KB), benefit is marginal.
+  - fastsafetensors load:         1.74x for Ultravox 1.3GB (0.18s saved)
+                                  ❌ FAILS on multi-shard models with
+                                     repeated tensor keys (Whisper has the
+                                     same `embed_positions.weight` in
+                                     encoder + decoder shards)
+                                  ❌ NO benefit when storage is fast NVMe
+                                     (already saturates ~3 GB/s)
+  - prefetch_safetensors:         ❌ ADDS overhead on fast NVMe (real bench
+                                     showed +37ms for 277MB model). Kept in
+                                     this module for slow-storage scenarios
+                                     but DO NOT call from server.py paths.
+  - runai-model-streamer:         ❌ Designed for S3/object storage, slower
+                                     than safetensors on local NVMe. Also
+                                     has cold-init overhead of ~20s on
+                                     first call.
 
-Usage from a server.py:
+Honest takeaway: on Vast.ai/RunPod with NVMe local storage, the safetensors
+deserialization path is NOT the cold-boot bottleneck. The bottlenecks are:
+  1. Docker image pull (dominant for non-pre-baked images)
+  2. transformers / diffusers high-level pipeline init
+     (config + tokenizer + processor downloads, sequential network ops)
+  3. Initial CUDA kernel compilation / warmup
+  4. Model dispatch (CPU → GPU, dtype conversion)
 
-    from coldstart import setup_torch_compile_cache, prefetch_safetensors
+Most "fast loaders" only help when storage is the bottleneck (S3, network
+volumes, slow disks). Save them for that scenario.
 
-    # Call once at process start (before any torch.compile)
-    setup_torch_compile_cache(cache_dir="/workspace/.torch-cache")
+Usage:
 
-    # Optionally prefetch weights into page cache before transformers
-    # opens them — converts random reads into sequential reads.
-    prefetch_safetensors("fixie-ai/ultravox-v0_6-llama-3_1-8b")
+    from coldstart import bootstrap
+
+    # Call ONCE at process start, BEFORE `import torch`
+    bootstrap()
+    import torch  # picks up TORCHINDUCTOR_* env vars
 """
 from __future__ import annotations
 
@@ -124,13 +149,19 @@ def prefetch_safetensors(
 ) -> float:
     """Prefetch safetensors files into the OS page cache via sequential read.
 
-    The first time `transformers.AutoModel.from_pretrained()` opens a
-    safetensors file, it does many small random reads (one per tensor metadata
-    + per shard). On a cold disk this is much slower than a single sequential
-    read of the whole file.
+    ⚠ DO NOT call this from server.py startup paths on fast NVMe hosts.
+    Real GPU benchmark on Vast.ai RTX 4090 (2026-04-08) showed it ADDS
+    ~37ms overhead for a 277MB model — the page-cache double-read is pure
+    waste when the disk is already fast (3 GB/s+). Useful ONLY when:
+      - Storage is slow (S3, network volume, magnetic disk)
+      - File is huge (10+ GB) and the diffusers/transformers loader does
+        many small reads in random order
 
-    By streaming the file once into /dev/null FIRST, the OS page cache holds
-    everything, and the subsequent transformers load becomes purely RAM-speed.
+    The theory is: transformers' from_pretrained() does many small random
+    reads, so a sequential prefetch warms the page cache and turns the
+    subsequent load into RAM-speed access. In practice, modern safetensors
+    is already very efficient and modern NVMe can sustain random reads at
+    near-sequential speeds — the optimization is usually a no-op or worse.
 
     Returns the elapsed prefetch time in seconds, or 0.0 if nothing was
     actually prefetched (no files found, all reads failed, etc.).
@@ -202,19 +233,45 @@ def prefetch_safetensors(
 # ── fastsafetensors loader (optional, for raw weight loading) ────────────────
 
 
-def load_with_fastsafetensors(files, device: str = "cuda", nogds: bool = False):
+def load_with_fastsafetensors(files, device: str = "cuda:0", nogds: bool = False):
     """Load safetensors files via fastsafetensors → device tensors dict.
 
     Returns: dict[name, torch.Tensor] on `device`.
 
-    Use this for advanced flows where you construct the model from a state_dict
-    yourself (skipping transformers' high-level loading). Most users should
-    just call `prefetch_safetensors()` and let transformers do its thing —
-    the page-cache warmup gets ~80% of the speedup with zero refactoring.
+    Real GPU benchmark on Vast.ai RTX 4090 (2026-04-08):
+        Ultravox 1.3GB single-shard:  1.74x faster than safetensors (5.4 GB/s
+        vs 3.2 GB/s). 0.18s saved per cold load.
 
+    ⚠ KNOWN LIMITATIONS (validated empirically):
+
+    1. **Multi-shard models with repeated tensor keys FAIL**.
+       fastsafetensors requires every tensor key to appear in exactly one
+       file. Whisper-large-v3 (encoder + decoder both have
+       `model.decoder.embed_positions.weight`) raises:
+           Exception: FilesBufferOnDevice: key X must be unique among files
+       This is unfixable at the loader level — would need to merge shards.
+
+    2. **GPUDirect Storage (GDS) requires cuFile lib**.
+       Without GDS, fastsafetensors uses CPU staging like safetensors.
+       The 4.8-7.5x speedups in the paper require GDS hardware.
+
+    3. **Marginal/no benefit on fast NVMe**.
+       Local NVMe at ~3 GB/s is already saturating safetensors' deserializer.
+       The biggest gains are when storage is slow (S3, EBS, network volumes).
+
+    Use this for advanced flows where you construct the model from a state_dict
+    yourself (skipping transformers' high-level loading). For most flows,
+    transformers / diffusers' built-in loaders are already fast enough.
+
+    `device` MUST include an index for CUDA — `"cuda:0"` not `"cuda"`. The
+    fastsafetensors library rejects ambiguous device strings. CPU is fine.
     Falls back to standard safetensors.load_file() if fastsafetensors is not
     installed (ImportError) or fails.
     """
+    # Normalize device string — fastsafetensors requires explicit index for CUDA
+    if device == "cuda":
+        device = "cuda:0"
+
     try:
         from fastsafetensors import SafeTensorsFileLoader, SingleGroup
     except ImportError:
