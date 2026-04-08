@@ -75,9 +75,17 @@ RUN pip install \
         --index-url https://download.pytorch.org/whl/cu124
 
 # ── WiLoR Python deps ────────────────────────────────────────────────────────
-# chumpy needs numpy installed first or its setup.py blows up
-RUN pip install "numpy<2.0" "Cython>=0.29"
-RUN pip install -r requirements.txt
+# chumpy is unmaintained — its setup.py imports pip at build time, but pip's
+# PEP 517 isolated build env doesn't expose pip. We must:
+#   1. Pre-install numpy<2 (chumpy uses np.bool which numpy 2 removed)
+#   2. Pre-install setuptools<70 + wheel + ninja explicitly so the
+#      non-isolated builds have everything they need
+#   3. Install chumpy with --no-build-isolation so its setup.py finds pip
+#   4. THEN install requirements.txt — chumpy will be skipped (already satisfied)
+RUN pip install "numpy<2.0" "Cython>=0.29" "setuptools<70" wheel ninja
+RUN pip install --no-build-isolation \
+        'git+https://github.com/mattloper/chumpy.git'
+RUN pip install --no-build-isolation -r requirements.txt
 
 # ── Pre-bake pretrained weights from the official HF Spaces mirror ───────────
 # detector.pt        ≈ 11 MB  (YOLOv8 hand detector)
