@@ -51,8 +51,30 @@ def setup_torch_compile_cache(cache_dir: str = "/workspace/.torch-cache") -> Non
 
     On RunPod with a network volume mounted at /workspace, the cache survives
     pod restarts → max benefit (one cold compile per VOLUME, not per CONTAINER).
+
+    Best-effort: if the cache dir cannot be created (read-only fs, permission
+    error), silently degrades to /tmp and never raises. The optimization is
+    optional — never block server startup over it.
     """
-    Path(cache_dir).mkdir(parents=True, exist_ok=True)
+    try:
+        Path(cache_dir).mkdir(parents=True, exist_ok=True)
+    except (OSError, PermissionError) as e:
+        fallback = "/tmp/.torch-cache"
+        print(
+            f"[coldstart] cannot create {cache_dir} ({e}); using {fallback}",
+            file=sys.stderr,
+        )
+        cache_dir = fallback
+        try:
+            Path(cache_dir).mkdir(parents=True, exist_ok=True)
+        except OSError as e2:
+            print(
+                f"[coldstart] cannot create fallback {fallback} either ({e2}); "
+                f"torch.compile cache disabled",
+                file=sys.stderr,
+            )
+            return  # Skip env var setup — no usable cache dir
+
     os.environ.setdefault("TORCHINDUCTOR_CACHE_DIR", cache_dir)
     os.environ.setdefault("TORCHINDUCTOR_FX_GRAPH_CACHE", "1")
     os.environ.setdefault("TORCHINDUCTOR_AUTOGRAD_CACHE", "1")
@@ -234,10 +256,19 @@ def bootstrap(
         from coldstart import bootstrap
         bootstrap()
         import torch  # now picks up the cache env vars
+
+    Best-effort: any individual setup that fails is logged and skipped.
+    Never raises — the server must start even if every optimization fails.
     """
-    setup_torch_compile_cache(torch_cache_dir)
+    try:
+        setup_torch_compile_cache(torch_cache_dir)
+    except Exception as e:
+        print(f"[coldstart] torch cache setup failed (non-fatal): {e}", file=sys.stderr)
     if enable_hf_xet:
-        setup_hf_xet_env()
+        try:
+            setup_hf_xet_env()
+        except Exception as e:
+            print(f"[coldstart] hf-xet setup failed (non-fatal): {e}", file=sys.stderr)
 
 
 if __name__ == "__main__":
