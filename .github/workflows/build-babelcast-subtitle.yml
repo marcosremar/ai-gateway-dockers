@@ -56,3 +56,51 @@ jobs:
             ghcr.io/marcosremar/babelcast-subtitle:${{ github.sha }}
           cache-from: type=gha,scope=babelcast-subtitle
           cache-to: type=gha,mode=max,scope=babelcast-subtitle
+
+  build-lazy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache /usr/local/share/boost /usr/share/swift \
+            /usr/local/graalvm /usr/local/share/chromium /usr/local/share/powershell \
+            /usr/local/.ghcup /opt/az /usr/share/miniconda /usr/local/go \
+            /usr/local/julia* /usr/local/sqlpackage /opt/microsoft /usr/local/aws-cli
+          sudo apt-get purge -y -qq firefox google-chrome-stable \
+            microsoft-edge-stable dotnet* aspnetcore* 2>/dev/null || true
+          sudo apt-get autoremove -y -qq && sudo apt-get clean
+          docker system prune -af
+          echo "Free space:" && df -h /
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push (lazy — models downloaded at runtime, ~6 GB image)
+        uses: docker/build-push-action@v6
+        with:
+          context: babelcast-subtitle
+          file: babelcast-subtitle/Dockerfile.lazy
+          push: true
+          tags: |
+            marcosremar/babelcast-subtitle:lazy
+            marcosremar/babelcast-subtitle:lazy-${{ github.sha }}
+            ghcr.io/marcosremar/babelcast-subtitle:lazy
+            ghcr.io/marcosremar/babelcast-subtitle:lazy-${{ github.sha }}
+          cache-from: type=gha,scope=babelcast-subtitle-lazy
+          cache-to: type=gha,mode=max,scope=babelcast-subtitle-lazy
