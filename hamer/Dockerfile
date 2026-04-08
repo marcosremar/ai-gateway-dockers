@@ -64,10 +64,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     rm -rf /var/lib/apt/lists/* && \
     git lfs install
 
-# Make python3.10 the default `python` and `pip`
+# Make python3.10 the default `python` and `pip`.
+# Cannot use `ensurepip` — Debian/Ubuntu disables it for system Python.
+# Use the official get-pip.py bootstrap instead, which works on every Python.
 RUN ln -sf /usr/bin/python3.10 /usr/local/bin/python && \
     ln -sf /usr/bin/python3.10 /usr/local/bin/python3 && \
-    python -m ensurepip --upgrade && \
+    wget -qO /tmp/get-pip.py https://bootstrap.pypa.io/get-pip.py && \
+    python3.10 /tmp/get-pip.py && \
+    rm /tmp/get-pip.py && \
     python -m pip install --upgrade pip setuptools wheel
 
 WORKDIR /app
