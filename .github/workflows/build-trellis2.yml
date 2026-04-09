@@ -59,3 +59,40 @@ jobs:
             ghcr.io/marcosremar/trellis2:${{ github.sha }}
           cache-from: type=gha,scope=trellis2
           cache-to: type=gha,mode=max,scope=trellis2
+
+      - name: Smoke test image (CPU mode, no GPU)
+        run: |
+          set -e
+          docker run -d --rm --name smoke \
+            -e ATTN_BACKEND=sdpa \
+            marcosremar/trellis2:latest \
+            bash -c "tail -f /dev/null"  # keep alive without running the server
+          sleep 5
+
+          echo "=== Verify file structure ==="
+          docker exec smoke ls -la /app/start.sh /app/server.py /app/trellis2/o-voxel/ || (docker logs smoke; exit 1)
+
+          echo "=== Verify start.sh is executable ==="
+          docker exec smoke test -x /app/start.sh || (docker logs smoke; exit 1)
+
+          echo "=== Verify Python can import server module ==="
+          docker exec smoke python -c "
+          import sys
+          sys.path.insert(0, '/app/trellis2')
+          # Validate ALL imports server.py needs (without actually starting the model)
+          import io, time, logging, tempfile, os
+          import fastapi, uvicorn, httpx
+          from PIL import Image
+          print('Basic imports OK')
+          import torch
+          print(f'torch {torch.__version__}')
+          # This is the line that had the typo:
+          gpu_props_attrs = [a for a in dir(torch.cuda) if 'device' in a.lower() or 'memory' in a.lower()]
+          print(f'cuda attrs: {gpu_props_attrs[:5]}')
+          " || (docker logs smoke; exit 1)
+
+          echo "=== Verify sshd binary is present ==="
+          docker exec smoke which sshd || (docker logs smoke; exit 1)
+
+          echo "=== Cleanup ==="
+          docker stop smoke

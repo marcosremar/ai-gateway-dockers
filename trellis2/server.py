@@ -17,10 +17,12 @@ Environment variables:
 """
 
 import os
+import sys
 import io
 import time
 import logging
 import tempfile
+import traceback
 from pathlib import Path
 
 import torch
@@ -97,21 +99,153 @@ async def startup():
 
 @app.get("/health")
 async def health():
-    gpu_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "N/A"
-    gpu_mem = f"{torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB" if torch.cuda.is_available() else "N/A"
-    return {
-        "status": "ready" if pipeline is not None else "loading" if model_loading else "error",
-        "model": MODEL_ID,
-        "gpu": gpu_name,
-        "gpu_memory": gpu_mem,
-        "error": model_error,
-        "config": {
-            "steps": STEPS,
-            "resolution": RESOLUTION,
-            "texture_size": TEXTURE_SIZE,
-            "decimation": DECIMATION,
-        },
+    """Health check endpoint.
+
+    IMPORTANT: This endpoint MUST NEVER return a 5xx. It is what the
+    gateway / deployment pipeline polls to know if the container is up,
+    so even when torch / cuda / the model are broken, we still want to
+    return 200 with diagnostic info so the caller can see *why* the
+    container is not ready. Any failure here is caught and embedded into
+    the response body instead of bubbling up as an exception."""
+    try:
+        cuda_ok = torch.cuda.is_available()
+    except Exception as e:
+        cuda_ok = False
+        log.warning(f"/health: torch.cuda.is_available() raised: {e}")
+
+    gpu_name = "N/A"
+    gpu_mem = "N/A"
+    if cuda_ok:
+        try:
+            gpu_name = torch.cuda.get_device_name(0)
+        except Exception as e:
+            gpu_name = f"error: {e}"
+        try:
+            gpu_mem = f"{torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB"
+        except Exception as e:
+            gpu_mem = f"error: {e}"
+
+    try:
+        if pipeline is not None:
+            status = "ready"
+        elif model_loading:
+            status = "loading"
+        elif model_error:
+            status = "error"
+        else:
+            status = "starting"
+    except Exception as e:
+        status = f"unknown: {e}"
+
+    try:
+        return JSONResponse(
+            status_code=200,
+            content={
+                "status": status,
+                "model": MODEL_ID,
+                "gpu": gpu_name,
+                "gpu_memory": gpu_mem,
+                "error": model_error,
+                "config": {
+                    "steps": STEPS,
+                    "resolution": RESOLUTION,
+                    "texture_size": TEXTURE_SIZE,
+                    "decimation": DECIMATION,
+                },
+            },
+        )
+    except Exception as e:
+        # Absolute last-resort fallback so /health literally never 5xxes.
+        return JSONResponse(
+            status_code=200,
+            content={"status": "degraded", "error": f"/health crashed: {e}"},
+        )
+
+
+@app.get("/diag")
+async def diag():
+    """Full diagnostic dump for debugging broken deployments.
+
+    Returns GPU info, environment variables (filtered), model status,
+    and file existence checks. Used when /health says the server is up
+    but generation still fails — gives the operator everything they need
+    without having to SSH in."""
+    info: dict = {}
+
+    # ── Python / process ─────────────────────────────────────────────
+    info["python"] = {
+        "version": sys.version,
+        "executable": sys.executable,
+        "cwd": os.getcwd(),
+        "pid": os.getpid(),
     }
+
+    # ── Torch / CUDA ─────────────────────────────────────────────────
+    torch_info: dict = {"version": getattr(torch, "__version__", "unknown")}
+    try:
+        torch_info["cuda_available"] = torch.cuda.is_available()
+        if torch.cuda.is_available():
+            torch_info["device_count"] = torch.cuda.device_count()
+            torch_info["device_name"] = torch.cuda.get_device_name(0)
+            props = torch.cuda.get_device_properties(0)
+            torch_info["total_memory_gb"] = round(props.total_memory / 1e9, 2)
+            torch_info["major"] = props.major
+            torch_info["minor"] = props.minor
+    except Exception as e:
+        torch_info["error"] = f"{type(e).__name__}: {e}"
+    info["torch"] = torch_info
+
+    # ── Environment (curated, no secrets) ────────────────────────────
+    env_allow_prefixes = (
+        "TRELLIS_", "HOST", "PORT", "CUDA_", "NVIDIA_", "PYTORCH_",
+        "HF_", "HUGGINGFACE_", "ATTN_", "LD_LIBRARY_PATH", "PATH", "PYTHONPATH",
+    )
+    info["env"] = {
+        k: v for k, v in os.environ.items()
+        if k.startswith(env_allow_prefixes)
+    }
+
+    # ── Model status ─────────────────────────────────────────────────
+    info["model"] = {
+        "id": MODEL_ID,
+        "loaded": pipeline is not None,
+        "loading": model_loading,
+        "error": model_error,
+    }
+
+    # ── File existence checks ────────────────────────────────────────
+    files_to_check = [
+        "/app/server.py",
+        "/app/start.sh",
+        "/app/trellis2",
+        "/app/trellis2/o-voxel",
+        "/var/log/app.log",
+    ]
+    info["files"] = {p: os.path.exists(p) for p in files_to_check}
+
+    # ── HF cache size (so we know if the model actually downloaded) ─
+    hf_cache_candidates = [
+        os.environ.get("HF_HOME"),
+        os.path.expanduser("~/.cache/huggingface"),
+        "/root/.cache/huggingface",
+    ]
+    hf_cache_info: dict = {}
+    for c in hf_cache_candidates:
+        if c and os.path.exists(c):
+            try:
+                total = 0
+                for root, _dirs, files in os.walk(c):
+                    for f in files:
+                        try:
+                            total += os.path.getsize(os.path.join(root, f))
+                        except OSError:
+                            pass
+                hf_cache_info[c] = {"exists": True, "size_gb": round(total / 1e9, 2)}
+            except Exception as e:
+                hf_cache_info[c] = {"exists": True, "error": str(e)}
+    info["hf_cache"] = hf_cache_info
+
+    return JSONResponse(status_code=200, content=info)
 
 
 def _generate_glb(image: Image.Image, seed: int = 0) -> tuple[str, dict]:
@@ -234,4 +368,15 @@ async def generate_from_url(
 
 
 if __name__ == "__main__":
+    log.info(f"Starting uvicorn on {HOST}:{PORT}")
+    log.info(f"Python {sys.version}")
+    try:
+        log.info(f"CUDA available: {torch.cuda.is_available()}")
+        if torch.cuda.is_available():
+            log.info(
+                f"GPU: {torch.cuda.get_device_name(0)} "
+                f"({torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB)"
+            )
+    except Exception as e:
+        log.warning(f"CUDA introspection failed: {e}")
     uvicorn.run(app, host=HOST, port=PORT, log_level="info")
