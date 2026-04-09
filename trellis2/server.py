@@ -64,7 +64,7 @@ def load_model():
         pipeline = Trellis2ImageTo3DPipeline.from_pretrained(MODEL_ID)
         pipeline.cuda()
         log.info(f"Model loaded on {torch.cuda.get_device_name(0)} "
-                 f"({torch.cuda.get_device_properties(0).total_mem / 1e9:.1f} GB)")
+                 f"({torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB)")
         model_loading = False
     except Exception as e:
         model_error = str(e)
@@ -98,7 +98,7 @@ async def startup():
 @app.get("/health")
 async def health():
     gpu_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "N/A"
-    gpu_mem = f"{torch.cuda.get_device_properties(0).total_mem / 1e9:.1f} GB" if torch.cuda.is_available() else "N/A"
+    gpu_mem = f"{torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB" if torch.cuda.is_available() else "N/A"
     return {
         "status": "ready" if pipeline is not None else "loading" if model_loading else "error",
         "model": MODEL_ID,
