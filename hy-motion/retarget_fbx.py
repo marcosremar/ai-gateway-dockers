@@ -1026,8 +1026,14 @@ def retarget_animation(src_skel: Skeleton, tgt_skel: Skeleton, mapping: dict[str
         tgt_world_anims[t_bone.name] = {}
         for f in frames:
             s_rot = s_bone.world_animation.get(f, s_bone.rest_rotation)
-            # Apply retargeting offset
-            t_rot = quaternion_multiply(s_rot, off)
+            # Apply retargeting offset: off × s_world (not s_world × off)
+            # Quaternion multiplication is non-commutative. The correct order
+            # for world-space retargeting is: first convert the source world
+            # rotation into the target rest frame (via the offset), preserving
+            # the animated displacement. s_world × off works for bones with
+            # similar rest orientations (legs) but fails for arms where the
+            # source and target rest poses differ significantly.
+            t_rot = quaternion_multiply(off, s_rot)
             # IMPORTANT: Apply global yaw offset to ALL bones to preserve target world space consistency
             if yaw_offset != 0:
                 t_rot = quaternion_multiply(yaw_q, t_rot)
