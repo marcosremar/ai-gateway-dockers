@@ -16,7 +16,9 @@ ENV OPENCV_IO_ENABLE_OPENEXR=1
 ENV ATTN_BACKEND=flash-attn
 ENV TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0"
 
-# System deps (EGL for nvdiffrast headless, eigen headers cloned by o-voxel)
+# System deps (EGL for nvdiffrast headless, eigen headers cloned by o-voxel,
+# openssh-server for Vast.ai SSH tunnel access — Vast hosts forward all
+# inbound traffic to the container's sshd, which we run alongside FastAPI)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.10 python3.10-dev python3-pip \
     git wget curl ffmpeg \
@@ -24,7 +26,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential g++ ninja-build cmake \
     libegl1-mesa-dev libgles2-mesa-dev libgl1-mesa-dev \
     libjpeg-dev \
-    && rm -rf /var/lib/apt/lists/*
+    openssh-server \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /var/run/sshd /root/.ssh \
+    && chmod 700 /root/.ssh
 
 RUN ln -sf /usr/bin/python3.10 /usr/bin/python && \
     ln -sf /usr/bin/pip3 /usr/bin/pip
@@ -93,11 +98,18 @@ ENV PYTHONPATH="/app/trellis2:${PYTHONPATH}"
 # Set HF_HOME to /workspace if available (Vast.ai mounts persistent storage there)
 ENV HF_HOME=/root/.cache/huggingface
 
-# Copy server
+# Copy server + entrypoint
 COPY server.py /app/server.py
+COPY start.sh /app/start.sh
+RUN chmod +x /app/start.sh
 
-EXPOSE 8000
+# Expose ports: 22 for sshd (Vast.ai SSH tunnel), 8000 for FastAPI inference
+EXPOSE 22 8000
+
 HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
-CMD ["python", "/app/server.py"]
+# start.sh launches sshd in background then runs FastAPI in foreground.
+# This is required for Vast.ai SSH tunnel access — without sshd in the
+# container, Vast's port forwarding to :22 has nothing to talk to.
+CMD ["/app/start.sh"]
