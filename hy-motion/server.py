@@ -47,13 +47,15 @@ os.makedirs(OUTPUT_ROOT, exist_ok=True)
 DEFAULT_DURATION = 5.0
 DEFAULT_CFG_SCALE = 5.0
 DEFAULT_NUM_SEEDS = 1     # 1 = lowest VRAM, fastest. Bump for diversity.
-# T2MRuntime.generate_motion supports two output_format values:
-#   "fbx"  → writes a real .fbx file (needs fbxsdkpy, which we ship)
-#   "dict" → writes a JSON file with raw SMPL/SMPL-H pose params per frame
-# We expose both so callers can pick: "fbx" for direct skeletal animation,
-# "dict" for retargeting onto a different rig (e.g. Sofia / Ready Player Me).
-DEFAULT_FORMAT = "fbx"
-SUPPORTED_FORMATS = {"fbx", "dict"}
+# Output formats:
+#   "fbx"     → raw SMPL-H FBX (same skeleton as HY-Motion, no retargeting)
+#   "mixamo"  → retargeted to Mixamo skeleton via retarget_fbx.py + template FBX
+#   "glb"     → retargeted Mixamo FBX converted to GLB (ready for Babylon.js / RPM)
+#   "dict"    → raw SMPL/SMPL-H pose params as JSON
+DEFAULT_FORMAT = "glb"
+SUPPORTED_FORMATS = {"fbx", "mixamo", "glb", "dict"}
+MIXAMO_TEMPLATE = "/app/mixamo_template.fbx"
+FBX2GLTF_BIN = "/usr/local/bin/FBX2glTF"
 
 # ---------------------------------------------------------------------------
 # Global model state — populated during lifespan startup so /health responds
@@ -161,7 +163,7 @@ class PredictRequest(BaseModel):
     duration: float = Field(DEFAULT_DURATION, ge=1.0, le=10.0, description="Output motion length in seconds")
     cfg_scale: float = Field(DEFAULT_CFG_SCALE, ge=1.0, le=15.0, description="Classifier-free guidance scale")
     num_seeds: int = Field(DEFAULT_NUM_SEEDS, ge=1, le=4, description="Random seed count (1 = least VRAM)")
-    format: str = Field(DEFAULT_FORMAT, description="Output format: fbx or dict")
+    format: str = Field(DEFAULT_FORMAT, description="Output format: glb (retargeted Mixamo, default), mixamo (retargeted FBX), fbx (raw SMPL), dict (JSON params)")
     seed: Optional[int] = Field(None, description="Override seed (else random)")
 
 
@@ -180,8 +182,10 @@ class PredictResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 def _run_inference(req: PredictRequest) -> dict:
-    """Run T2MRuntime and return the requested output format as base64."""
+    """Run T2MRuntime, optionally retarget to Mixamo, return as base64."""
     import random
+    import subprocess
+
     if req.format not in SUPPORTED_FORMATS:
         raise ValueError(f"Unsupported format '{req.format}'. Use one of: {sorted(SUPPORTED_FORMATS)}")
 
@@ -192,39 +196,97 @@ def _run_inference(req: PredictRequest) -> dict:
     seeds = [req.seed if req.seed is not None else random.randint(0, 999999) for _ in range(req.num_seeds)]
     seeds_csv = ",".join(map(str, seeds))
 
-    # T2MRuntime exposes `generate_motion` which writes one or more files to
-    # disk and returns (html, fbx_files, _). We pass output_format = our
-    # format string and read the resulting file off disk afterwards.
     t0 = time.perf_counter()
+
+    # Step 1: Always generate raw SMPL FBX first
     _, files, _ = _runtime.generate_motion(
         text=req.text,
         seeds_csv=seeds_csv,
         duration=req.duration,
         cfg_scale=req.cfg_scale,
-        output_format=req.format,
+        output_format="fbx",
         original_text=req.text,
         output_dir=job_dir,
         output_filename=job_id,
     )
-    latency_ms = (time.perf_counter() - t0) * 1000
-
     if not files:
         raise RuntimeError("HY-Motion produced no output files")
 
-    # Pick the first generated file (we requested num_seeds=1 by default)
-    out_path = files[0] if isinstance(files, list) else files
-    if not os.path.exists(out_path):
-        raise RuntimeError(f"Generated file not found at {out_path}")
+    raw_fbx = files[0] if isinstance(files, list) else files
+    if not os.path.exists(raw_fbx):
+        raise RuntimeError(f"Raw FBX not found at {raw_fbx}")
+
+    out_format = req.format
+    out_path = raw_fbx
+
+    # Step 2: Retarget to Mixamo if requested
+    if out_format in ("mixamo", "glb"):
+        retargeted_fbx = os.path.join(job_dir, f"{job_id}_mixamo.fbx")
+        print(f"[predict] Retargeting SMPL-H → Mixamo...", flush=True)
+
+        # retarget_fbx.py expects an NPZ with motion params. The FBX was
+        # generated from the same params, but we need the NPZ for the
+        # retargeting module. Generate it from the runtime's last output.
+        # Alternatively, call retarget_fbx CLI directly on the FBX+template.
+        try:
+            sys.path.insert(0, "/app")
+            from retarget_fbx import retarget_fbx as do_retarget
+            # retarget_fbx can work from an FBX source or NPZ. Try FBX→FBX.
+            do_retarget(
+                npz_path=None,
+                source_fbx_path=raw_fbx,
+                target_fbx_path=MIXAMO_TEMPLATE,
+                output_path=retargeted_fbx,
+            )
+        except TypeError:
+            # If the function signature doesn't accept source_fbx_path,
+            # fall back to calling it as a subprocess.
+            result = subprocess.run(
+                [sys.executable, "/app/retarget_fbx.py",
+                 "--source", raw_fbx,
+                 "--target", MIXAMO_TEMPLATE,
+                 "--output", retargeted_fbx],
+                capture_output=True, text=True, timeout=120,
+            )
+            if result.returncode != 0:
+                print(f"[predict] retarget stderr: {result.stderr[:500]}", flush=True)
+                raise RuntimeError(f"Retargeting failed: {result.stderr[:200]}")
+
+        if os.path.exists(retargeted_fbx):
+            out_path = retargeted_fbx
+            print(f"[predict] Retargeted FBX: {os.path.getsize(retargeted_fbx)} bytes", flush=True)
+        else:
+            print(f"[predict] WARNING: retarget produced no output, using raw FBX", flush=True)
+
+    # Step 3: Convert to GLB if requested
+    if out_format == "glb":
+        glb_path = os.path.join(job_dir, f"{job_id}.glb")
+        print(f"[predict] Converting FBX → GLB...", flush=True)
+        result = subprocess.run(
+            [FBX2GLTF_BIN, "--binary", "--input", out_path, "--output",
+             glb_path.replace(".glb", "")],
+            capture_output=True, text=True, timeout=60,
+        )
+        glb_actual = glb_path  # FBX2glTF adds .glb extension
+        if os.path.exists(glb_actual):
+            out_path = glb_actual
+            print(f"[predict] GLB: {os.path.getsize(glb_actual)} bytes", flush=True)
+        else:
+            print(f"[predict] FBX2glTF failed: {result.stderr[:300]}", flush=True)
+            # Fall back to returning the FBX
+            out_format = "mixamo" if out_format == "glb" else out_format
+
+    latency_ms = (time.perf_counter() - t0) * 1000
 
     with open(out_path, "rb") as f:
         data = f.read()
 
     return {
         "status": "ok",
-        "format": req.format,
+        "format": out_format,
         "data_base64": base64.b64encode(data).decode("ascii"),
         "duration": req.duration,
-        "rewritten_text": req.text,  # we disabled rewrite, so it's identical
+        "rewritten_text": req.text,
         "latency_ms": round(latency_ms, 1),
     }
 

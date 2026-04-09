@@ -84,6 +84,18 @@ RUN pip install --no-cache-dir \
 # skipped — the server runs with disable_prompt_engineering=True so callers
 # pass pre-formatted English prompts.
 
+# Retargeting: SMPL-H → Mixamo via retarget_fbx.py (from hy-motion-fbx-exporter)
+# + Mixamo character FBX template for target skeleton
+COPY retarget_fbx.py /app/retarget_fbx.py
+COPY mixamo_template.fbx /app/mixamo_template.fbx
+
+# FBX2glTF for converting retargeted FBX → GLB (Babylon.js native format)
+RUN apt-get update && apt-get install -y --no-install-recommends wget && \
+    wget -q https://github.com/godotengine/FBX2glTF/releases/download/v0.13.1/FBX2glTF-linux-x86_64.zip -O /tmp/fbx2gltf.zip && \
+    cd /usr/local/bin && python3 -c "import zipfile; zipfile.ZipFile('/tmp/fbx2gltf.zip').extractall('.')" && \
+    chmod +x /usr/local/bin/FBX2glTF && rm /tmp/fbx2gltf.zip && \
+    apt-get remove -y wget && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
+
 # FastAPI server + entrypoint
 COPY server.py /app/server.py
 COPY start.sh /app/start.sh
