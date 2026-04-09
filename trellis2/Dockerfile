@@ -32,6 +32,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1-mesa-glx libglib2.0-0 libgomp1 \
     build-essential g++ ninja-build cmake \
     libx11-dev libxrender-dev libxext-dev \
+    libegl1-mesa-dev libgles2-mesa-dev libgl1-mesa-dev \
     && rm -rf /var/lib/apt/lists/*
 
 RUN ln -sf /usr/bin/python3.10 /usr/bin/python && \
@@ -63,8 +64,9 @@ RUN pip install --no-cache-dir \
 RUN pip install --no-cache-dir flash-attn==2.7.3 --no-build-isolation \
     || pip install --no-cache-dir flash-attn --no-build-isolation
 
-# nvdiffrast (differentiable rasterizer — needed for mesh/texture export)
-RUN pip install --no-cache-dir git+https://github.com/NVlabs/nvdiffrast.git
+# nvdiffrast (differentiable rasterizer — needs EGL/OpenGL dev headers)
+RUN pip install --no-cache-dir git+https://github.com/NVlabs/nvdiffrast.git \
+    || echo "WARN: nvdiffrast build failed — mesh export may use fallback"
 
 # TRELLIS.2 custom CUDA extensions — each has a setup.py that uses
 # torch.utils.cpp_extension. TORCH_CUDA_ARCH_LIST lets them compile
