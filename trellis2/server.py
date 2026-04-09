@@ -55,8 +55,14 @@ model_loading = False
 model_error = None
 
 
+# Full traceback of last model load failure (captured separately so we never
+# lose the stack — `model_error` is the short summary used by /health, this
+# is the multi-line dump used by /diag and embedded in /var/log/app.log).
+model_error_traceback: str | None = None
+
+
 def load_model():
-    global pipeline, model_loading, model_error
+    global pipeline, model_loading, model_error, model_error_traceback
     if pipeline is not None:
         return
     model_loading = True
@@ -69,9 +75,17 @@ def load_model():
                  f"({torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB)")
         model_loading = False
     except Exception as e:
-        model_error = str(e)
+        # Capture BOTH a short summary (for /health JSON) AND the full
+        # traceback (for /diag and the log file). Previously we only saved
+        # str(e), which meant the operator saw a 1-line "404 Not Found" with
+        # no idea which file or function actually triggered the download.
+        model_error = f"{type(e).__name__}: {e}"
+        model_error_traceback = traceback.format_exc()
         model_loading = False
-        log.error(f"Failed to load model: {e}")
+        # Log the full traceback at ERROR level so it lands in app.log via
+        # the tee in start.sh. Without this the background thread would
+        # swallow the stack and only `str(e)` would survive.
+        log.error("Failed to load model — full traceback:\n%s", model_error_traceback)
         raise
 
 
@@ -80,7 +94,14 @@ def _load_model_thread():
     try:
         load_model()
     except Exception as e:
-        log.error(f"Background model load failed: {e}")
+        # Belt-and-suspenders: load_model() already logged the traceback,
+        # but in case any exception slips through (e.g. raised from a c-ext
+        # before our try/except in load_model), capture it here too.
+        tb = traceback.format_exc()
+        log.error("Background model load failed:\n%s", tb)
+        # Also write directly to stderr in case the logging handler itself
+        # is misconfigured — stderr is captured by the tee in start.sh.
+        print(f"[BACKGROUND THREAD ERROR] {e}\n{tb}", file=sys.stderr, flush=True)
 
 
 @app.on_event("startup")
@@ -146,6 +167,11 @@ async def health():
                 "gpu": gpu_name,
                 "gpu_memory": gpu_mem,
                 "error": model_error,
+                # Full multi-line stack trace of the most recent model load
+                # failure. Embedded directly in /health so the operator does
+                # not need to SSH in to see *which* line of the model code
+                # raised — they can just curl /health.
+                "error_traceback": model_error_traceback,
                 "config": {
                     "steps": STEPS,
                     "resolution": RESOLUTION,
@@ -211,7 +237,30 @@ async def diag():
         "loaded": pipeline is not None,
         "loading": model_loading,
         "error": model_error,
+        "error_traceback": model_error_traceback,
     }
+
+    # ── App log tail (last ~200 lines of /var/log/app.log) ───────────
+    # We tail the log file directly so an operator hitting /diag from
+    # outside the container sees the same thing they would see by
+    # SSHing in and running `tail -200 /var/log/app.log`. This is the
+    # last-resort fallback when nothing else explains the failure.
+    log_tail: list[str] = []
+    log_path = "/var/log/app.log"
+    try:
+        if os.path.exists(log_path):
+            with open(log_path, "rb") as f:
+                # Seek near the end to avoid loading the whole file into
+                # memory if it has grown large from a stuck model loop.
+                f.seek(0, os.SEEK_END)
+                size = f.tell()
+                read_bytes = min(size, 64 * 1024)  # last 64 KiB
+                f.seek(size - read_bytes)
+                tail_text = f.read().decode("utf-8", errors="replace")
+                log_tail = tail_text.splitlines()[-200:]
+    except Exception as e:
+        log_tail = [f"[diag: failed to read {log_path}: {e}]"]
+    info["app_log_tail"] = log_tail
 
     # ── File existence checks ────────────────────────────────────────
     files_to_check = [
@@ -246,6 +295,40 @@ async def diag():
     info["hf_cache"] = hf_cache_info
 
     return JSONResponse(status_code=200, content=info)
+
+
+@app.get("/logs")
+async def logs(lines: int = Query(500, ge=1, le=5000, description="Number of trailing lines to return")):
+    """Return the last N lines of /var/log/app.log as plain text.
+
+    Lets an operator (or the gateway's /v1/gpu/inspect proxy) read the
+    raw container logs over HTTP without SSHing in. Used as the primary
+    diagnostic when the model fails to load and we need the full
+    traceback that load_model() captured."""
+    log_path = "/var/log/app.log"
+    if not os.path.exists(log_path):
+        return JSONResponse(
+            status_code=200,
+            content={"error": f"{log_path} does not exist"},
+        )
+    try:
+        # Read the last ~lines * 200 bytes to keep memory bounded even if
+        # individual lines are huge (e.g. tracebacks with deep frames).
+        max_bytes = max(64 * 1024, lines * 200)
+        with open(log_path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            read_bytes = min(size, max_bytes)
+            f.seek(size - read_bytes)
+            text = f.read().decode("utf-8", errors="replace")
+        tail = "\n".join(text.splitlines()[-lines:])
+        from fastapi.responses import PlainTextResponse
+        return PlainTextResponse(content=tail, status_code=200)
+    except Exception as e:
+        return JSONResponse(
+            status_code=200,
+            content={"error": f"failed to read log: {e}"},
+        )
 
 
 def _generate_glb(image: Image.Image, seed: int = 0) -> tuple[str, dict]:

@@ -115,7 +115,16 @@ python -c "import torch; print(f'torch {torch.__version__} cuda={torch.cuda.is_a
 
 echo "===== PHASE: LAUNCH FASTAPI ====="
 echo "[trellis2] Launching FastAPI server on port 8000..."
-# Use -u for unbuffered output so logs appear in real time, and tee
-# everything into /var/log/app.log in addition to stdout so operators can
-# `tail -f /var/log/app.log` over SSH.
-exec python -u /app/server.py 2>&1 | tee -a /var/log/app.log
+# Use -u for unbuffered output so logs appear in real time. We also force
+# PYTHONUNBUFFERED=1 and PYTHONFAULTHANDLER=1 for belt-and-suspenders:
+#   - PYTHONUNBUFFERED=1: redundant with -u but also covers child processes
+#   - PYTHONFAULTHANDLER=1: dumps Python tracebacks on SIGSEGV/SIGFPE so we
+#     don't lose tracebacks if the model load segfaults inside a c-ext
+# Note: this whole script's stdout/stderr are already being teed into
+# /var/log/app.log by the `exec > >(tee -a ...)` line at the top. Adding
+# another `| tee` here would create a SECOND pipe in front of python and
+# break the exit-code propagation. So we just inherit the parent script's
+# already-tee'd stdout/stderr.
+export PYTHONUNBUFFERED=1
+export PYTHONFAULTHANDLER=1
+exec python -u /app/server.py
