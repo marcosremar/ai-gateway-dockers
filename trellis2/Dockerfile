@@ -68,10 +68,14 @@ RUN pip install --no-cache-dir flash-attn==2.7.3 --no-build-isolation \
     || echo "WARN: flash-attn failed — will use xformers or sdpa fallback"
 
 # ── nvdiffrast (from setup.sh --nvdiffrast) ──
+# CRITICAL: must succeed — o-voxel imports it at module load time and the
+# error gets masked as a HuggingFace 404. The --no-build-isolation flag is
+# required because nvdiffrast's setup.py imports torch for CUDA arch detection.
+# We also explicitly set MAX_JOBS=2 to keep RAM under CI limits.
 RUN mkdir -p /tmp/extensions && \
     git clone https://github.com/NVlabs/nvdiffrast.git /tmp/extensions/nvdiffrast && \
-    pip install --no-cache-dir /tmp/extensions/nvdiffrast --no-build-isolation \
-    || echo "WARN: nvdiffrast failed"
+    MAX_JOBS=2 pip install --no-cache-dir /tmp/extensions/nvdiffrast --no-build-isolation && \
+    python -c "import nvdiffrast; print('nvdiffrast OK')"
 
 # ── nvdiffrec (from setup.sh --nvdiffrec, renderutils branch) ──
 RUN git clone -b renderutils https://github.com/JeffreyXiang/nvdiffrec.git /tmp/extensions/nvdiffrec && \

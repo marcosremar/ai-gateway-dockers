@@ -86,9 +86,19 @@ jobs:
           print('Basic imports OK')
           import torch
           print(f'torch {torch.__version__}')
-          # This is the line that had the typo:
           gpu_props_attrs = [a for a in dir(torch.cuda) if 'device' in a.lower() or 'memory' in a.lower()]
           print(f'cuda attrs: {gpu_props_attrs[:5]}')
+          # Critical deps that caused silent failures at runtime — if ANY of
+          # these fails the model loader masks the error as a bogus HF 404:
+          import plyfile; print('plyfile OK')
+          import nvdiffrast; print('nvdiffrast OK')
+          # Try importing o_voxel — this is what actually fails at runtime
+          # when nvdiffrast or plyfile is missing:
+          from o_voxel import io as ovio, postprocess
+          print('o_voxel OK')
+          # Verify trellis2 pipeline can at least be imported (no model needed):
+          from trellis2.pipelines import Trellis2ImageTo3DPipeline
+          print('trellis2 pipeline import OK')
           " || (docker logs smoke; exit 1)
 
           echo "=== Verify sshd binary is present ==="
