@@ -1033,7 +1033,7 @@ def retarget_animation(src_skel: Skeleton, tgt_skel: Skeleton, mapping: dict[str
             # the animated displacement. s_world × off works for bones with
             # similar rest orientations (legs) but fails for arms where the
             # source and target rest poses differ significantly.
-            t_rot = quaternion_multiply(off, s_rot)
+            t_rot = quaternion_multiply(s_rot, off)
             # IMPORTANT: Apply global yaw offset to ALL bones to preserve target world space consistency
             if yaw_offset != 0:
                 t_rot = quaternion_multiply(yaw_q, t_rot)
