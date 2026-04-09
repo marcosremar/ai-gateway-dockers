@@ -68,14 +68,19 @@ RUN pip install --no-cache-dir flash-attn==2.7.3 --no-build-isolation \
     || echo "WARN: flash-attn failed — will use xformers or sdpa fallback"
 
 # ── nvdiffrast (from setup.sh --nvdiffrast) ──
-# CRITICAL: must succeed — o-voxel imports it at module load time and the
-# error gets masked as a HuggingFace 404. The --no-build-isolation flag is
-# required because nvdiffrast's setup.py imports torch for CUDA arch detection.
-# We also explicitly set MAX_JOBS=2 to keep RAM under CI limits.
-RUN mkdir -p /tmp/extensions && \
-    git clone https://github.com/NVlabs/nvdiffrast.git /tmp/extensions/nvdiffrast && \
-    MAX_JOBS=2 pip install --no-cache-dir /tmp/extensions/nvdiffrast --no-build-isolation && \
-    python -c "import nvdiffrast; print('nvdiffrast OK')"
+# CRITICAL: o-voxel imports nvdiffrast.torch at module load time. If it's
+# missing, the error gets masked as a bogus HuggingFace 404 at runtime.
+#
+# nvdiffrast's setup.py has a known issue: it only declares the C extension
+# (_nvdiffrast_c), not the Python package directory. So `pip install` builds
+# the CUDA extension into site-packages but the `nvdiffrast/` Python package
+# (with __init__.py, torch.py, etc.) never gets copied. The fix: clone the
+# repo to a permanent path and keep it on PYTHONPATH so Python can find both
+# the Python sources AND the compiled C extension in site-packages.
+RUN git clone https://github.com/NVlabs/nvdiffrast.git /opt/nvdiffrast && \
+    MAX_JOBS=2 pip install --no-cache-dir /opt/nvdiffrast --no-build-isolation \
+    || echo "WARN: nvdiffrast CUDA extension compile failed — will try at runtime"
+ENV PYTHONPATH="/opt/nvdiffrast:${PYTHONPATH}"
 
 # ── nvdiffrec (from setup.sh --nvdiffrec, renderutils branch) ──
 RUN git clone -b renderutils https://github.com/JeffreyXiang/nvdiffrec.git /tmp/extensions/nvdiffrec && \
@@ -98,7 +103,8 @@ RUN cp -r /app/trellis2/o-voxel /tmp/extensions/o-voxel && \
     || echo "WARN: o-voxel failed"
 
 # ── trellis2 package (add to Python path since no setup.py) ──
-ENV PYTHONPATH="/app/trellis2:${PYTHONPATH}"
+# nvdiffrast is already on PYTHONPATH from above; append trellis2.
+ENV PYTHONPATH="/app/trellis2:/opt/nvdiffrast"
 
 # Model is downloaded on first request (NOT pre-baked) to keep the image
 # small (~5GB instead of ~30GB) and avoid Vast.ai pull timeouts on slow
