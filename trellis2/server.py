@@ -61,6 +61,48 @@ model_error = None
 model_error_traceback: str | None = None
 
 
+def _ensure_model_local() -> str:
+    """Pre-download the TRELLIS.2 model to a local directory and return the path.
+
+    BACKGROUND: TRELLIS.2's `from_pretrained()` has an upstream bug where the
+    parent pipeline calls `models.from_pretrained(f"{path}/{v}")` with `v`
+    coming from the JSON config. The config keys look like
+    `ckpts/shape_dec_next_dc_f16c32_fp16` (already prefixed with "ckpts/"),
+    and the download helper splits the path on "/" expecting an
+    `org/repo/file` 3-part format. When `path` is `microsoft/TRELLIS.2-4B`
+    and `v` is `ckpts/shape_dec_next_dc_f16c32_fp16`, you'd expect a 4-part
+    path that resolves correctly — but somewhere along the way the
+    `microsoft/TRELLIS.2-4B/` prefix gets stripped, leaving the loader to
+    request `https://huggingface.co/ckpts/shape_dec_next_dc_f16c32_fp16/`
+    which is a malformed repo path → 404.
+
+    THE FIX: snapshot_download() the entire repo to a local directory once.
+    The loader's "is this path local?" check (which runs BEFORE the buggy
+    URL construction) succeeds, so we never hit the broken code path. The
+    download path is fast (single HTTP/2 connection vs N round-trips) and
+    HuggingFace already does the de-dup/resume work for us.
+    """
+    from huggingface_hub import snapshot_download
+    log.info(f"Pre-downloading {MODEL_ID} via snapshot_download() ...")
+    local_dir = snapshot_download(
+        repo_id=MODEL_ID,
+        # Pull EVERYTHING — TRELLIS.2 lazily loads many sub-checkpoints
+        # from /ckpts and we don't know in advance which ones the loader
+        # will ask for at runtime. Skipping pulled bytes is cheap.
+        local_dir=os.path.join(
+            os.environ.get("HF_HOME", "/root/.cache/huggingface"),
+            "trellis2-snapshot",
+        ),
+        # Use symlinks to keep the on-disk footprint sane (~15GB shared
+        # with the global HF cache instead of duplicated).
+        local_dir_use_symlinks=True,
+        # Pass HF_TOKEN through if set (gated/private repos).
+        token=os.environ.get("HF_TOKEN") or None,
+    )
+    log.info(f"Snapshot ready at {local_dir}")
+    return local_dir
+
+
 def load_model():
     global pipeline, model_loading, model_error, model_error_traceback
     if pipeline is not None:
@@ -68,8 +110,16 @@ def load_model():
     model_loading = True
     log.info(f"Loading TRELLIS.2 model: {MODEL_ID} ...")
     try:
+        # Step 1: ensure the entire model repo is on local disk. This
+        # works around the upstream URL-construction bug — see
+        # _ensure_model_local() docstring for the gory details.
+        local_path = _ensure_model_local()
+
+        # Step 2: load via the local path. The loader's local-file check
+        # (`if os.path.exists(f"{path}.json")`) short-circuits the buggy
+        # remote download, so we get the unmodified model on disk.
         from trellis2.pipelines import Trellis2ImageTo3DPipeline
-        pipeline = Trellis2ImageTo3DPipeline.from_pretrained(MODEL_ID)
+        pipeline = Trellis2ImageTo3DPipeline.from_pretrained(local_path)
         pipeline.cuda()
         log.info(f"Model loaded on {torch.cuda.get_device_name(0)} "
                  f"({torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB)")
