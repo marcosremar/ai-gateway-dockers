@@ -47,8 +47,13 @@ os.makedirs(OUTPUT_ROOT, exist_ok=True)
 DEFAULT_DURATION = 5.0
 DEFAULT_CFG_SCALE = 5.0
 DEFAULT_NUM_SEEDS = 1     # 1 = lowest VRAM, fastest. Bump for diversity.
-DEFAULT_FORMAT = "bvh"
-SUPPORTED_FORMATS = {"bvh", "gltf"}
+# T2MRuntime.generate_motion supports two output_format values:
+#   "fbx"  → writes a real .fbx file (needs fbxsdkpy, which we ship)
+#   "dict" → writes a JSON file with raw SMPL/SMPL-H pose params per frame
+# We expose both so callers can pick: "fbx" for direct skeletal animation,
+# "dict" for retargeting onto a different rig (e.g. Sofia / Ready Player Me).
+DEFAULT_FORMAT = "fbx"
+SUPPORTED_FORMATS = {"fbx", "dict"}
 
 # ---------------------------------------------------------------------------
 # Global model state — populated during lifespan startup so /health responds
@@ -156,7 +161,7 @@ class PredictRequest(BaseModel):
     duration: float = Field(DEFAULT_DURATION, ge=1.0, le=10.0, description="Output motion length in seconds")
     cfg_scale: float = Field(DEFAULT_CFG_SCALE, ge=1.0, le=15.0, description="Classifier-free guidance scale")
     num_seeds: int = Field(DEFAULT_NUM_SEEDS, ge=1, le=4, description="Random seed count (1 = least VRAM)")
-    format: str = Field(DEFAULT_FORMAT, description="Output animation format: bvh or gltf")
+    format: str = Field(DEFAULT_FORMAT, description="Output format: fbx or dict")
     seed: Optional[int] = Field(None, description="Override seed (else random)")
 
 

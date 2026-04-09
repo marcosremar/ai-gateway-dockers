@@ -52,6 +52,7 @@ WORKDIR /app/HY-Motion-1.0
 #     hf_hub, omegaconf, transforms3d, scipy come from the upstream pin so the
 #     model loader code matches what HY-Motion expects.
 RUN pip install --no-cache-dir \
+    --extra-index-url https://gitlab.inria.fr/api/v4/projects/18692/packages/pypi/simple \
     huggingface_hub==0.30.0 hf_transfer hf_xet \
     torchdiffeq==0.2.5 \
     accelerate==0.30.1 \
@@ -64,10 +65,14 @@ RUN pip install --no-cache-dir \
     transforms3d==0.4.2 \
     PyYAML==6.0 omegaconf==2.3.0 click==8.1.3 requests==2.32.4 \
     openai==1.78.1 \
+    fbxsdkpy==2020.1.post2 \
     fastapi uvicorn[standard] python-multipart pydantic
 # openai is required at module-import time by hymotion/prompt_engineering/
 # prompt_rewrite.py, even when disable_prompt_engineering=True at runtime.
 # hf_xet enables Xet storage for faster HuggingFace downloads.
+# fbxsdkpy is the Autodesk FBX SDK Python bindings hosted on INRIA's GitLab
+# package index (the only public source of pre-built wheels). It enables
+# T2MRuntime's `output_format="fbx"` path.
 
 # NOTE: weights are NOT pre-baked. On first boot the server will download:
 #   - tencent/HY-Motion-1.0          (~4 GB DiT generator)
