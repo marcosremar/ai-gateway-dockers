@@ -50,11 +50,9 @@ RUN pip install --no-cache-dir \
     pip install --no-cache-dir xformers==0.0.26.post1 \
     --index-url https://download.pytorch.org/whl/cu121
 
-# ── pytorch3d — pre-built wheel (avoids 30-60min source compilation) ─────────
+# ── pytorch3d — build from source (pre-built wheel URLs are unreliable) ──────
 RUN pip install --no-cache-dir fvcore iopath && \
-    pip install --no-cache-dir \
-    "pytorch3d @ https://dl.fbaipublicfiles.com/pytorch3d/packaging/wheels/py310_cu121_pyt230/pytorch3d-0.7.8-cp310-cp310-linux_x86_64.whl" \
-    || pip install --no-cache-dir "git+https://github.com/facebookresearch/pytorch3d.git"
+    pip install --no-cache-dir "git+https://github.com/facebookresearch/pytorch3d.git"
 
 # ── Clone LAM ────────────────────────────────────────────────────────────────
 RUN git clone --depth 1 https://github.com/aigc3d/LAM.git /app/lam
