@@ -90,11 +90,12 @@ COPY retarget_fbx.py /app/retarget_fbx.py
 COPY mixamo_template.fbx /app/mixamo_template.fbx
 
 # FBX2glTF for converting retargeted FBX → GLB (Babylon.js native format)
-RUN apt-get update && apt-get install -y --no-install-recommends wget && \
-    wget -q https://github.com/godotengine/FBX2glTF/releases/download/v0.13.1/FBX2glTF-linux-x86_64.zip -O /tmp/fbx2gltf.zip && \
-    cd /usr/local/bin && python3 -c "import zipfile; zipfile.ZipFile('/tmp/fbx2gltf.zip').extractall('.')" && \
-    chmod +x /usr/local/bin/FBX2glTF && rm /tmp/fbx2gltf.zip && \
-    apt-get remove -y wget && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
+# The zip contains FBX2glTF-linux-x86_64/FBX2glTF-linux-x86_64 (binary in subdir)
+RUN wget -q https://github.com/godotengine/FBX2glTF/releases/download/v0.13.1/FBX2glTF-linux-x86_64.zip -O /tmp/fbx2gltf.zip && \
+    cd /tmp && python3 -c "import zipfile; zipfile.ZipFile('fbx2gltf.zip').extractall('.')" && \
+    mv /tmp/FBX2glTF-linux-x86_64/FBX2glTF-linux-x86_64 /usr/local/bin/FBX2glTF && \
+    chmod +x /usr/local/bin/FBX2glTF && \
+    rm -rf /tmp/fbx2gltf.zip /tmp/FBX2glTF-linux-x86_64
 
 # FastAPI server + entrypoint
 COPY server.py /app/server.py
