@@ -80,7 +80,19 @@ RUN pip install --no-cache-dir flash-attn==2.7.3 --no-build-isolation \
 RUN git clone https://github.com/NVlabs/nvdiffrast.git /opt/nvdiffrast && \
     MAX_JOBS=2 pip install --no-cache-dir /opt/nvdiffrast --no-build-isolation \
     || echo "WARN: nvdiffrast CUDA extension compile failed — will try at runtime"
-ENV PYTHONPATH="/opt/nvdiffrast:${PYTHONPATH}"
+# Patch nvdiffrast/__init__.py to tolerate missing package metadata. The
+# upstream code calls importlib.metadata.version('nvdiffrast') which raises
+# PackageNotFoundError because the wheel is registered as "UNKNOWN-0.0.0"
+# (their setup.py declares only the C extension, not the package). The
+# version string is purely informational so we replace the lookup with a
+# hardcoded fallback. Without this patch, `import nvdiffrast` blows up
+# before any code runs.
+RUN python -c "import re,os; p='/opt/nvdiffrast/nvdiffrast/__init__.py'; \
+src=open(p).read(); \
+new=re.sub(r'__version__\s*=\s*version\([^)]*\)', \"__version__ = '0.3.3-local'\", src); \
+open(p,'w').write(new); \
+print('patched __init__.py')"
+ENV PYTHONPATH="/opt/nvdiffrast"
 
 # ── nvdiffrec (from setup.sh --nvdiffrec, renderutils branch) ──
 RUN git clone -b renderutils https://github.com/JeffreyXiang/nvdiffrec.git /tmp/extensions/nvdiffrec && \
