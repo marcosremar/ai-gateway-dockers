@@ -44,12 +44,17 @@ RUN git clone --recursive --depth 1 https://github.com/microsoft/TRELLIS.2.git /
 WORKDIR /app/trellis2
 
 # ── Basic deps (from setup.sh --basic) ──
+# plyfile: required by o-voxel.io.ply at import time. Without it, o-voxel
+# fails to import, which silently masks itself as a HuggingFace 404 inside
+# the trellis2 model loader's fallback path. Took a full traceback dump to
+# find this — see ai-gateway commit "fail-fast on app errors".
 RUN pip install --no-cache-dir \
     imageio imageio-ffmpeg tqdm easydict \
     opencv-python-headless ninja trimesh \
     transformers \
     pandas lpips zstandard \
     Pillow kornia timm \
+    plyfile \
     git+https://github.com/EasternJournalist/utils3d.git@9a4eb15e4021b67b12c460c7057d642626897ec8
 
 # Our server deps
