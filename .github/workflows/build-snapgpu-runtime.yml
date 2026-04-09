@@ -2,11 +2,9 @@ name: Build snapgpu-runtime Docker image
 
 # snapgpu-runtime is the base image for fast-cold-start GPU containers.
 # It bundles CRIU + cuda-checkpoint + the snapgpu Python control plane.
-# Concrete app images (e.g. snapgpu-runtime-babelcast) extend this base.
 #
-# IMPORTANT: this build needs the snapgpu/, gateway/, worker/ Python packages
-# from the parent ai-gateway repo. Since this dockers/ submodule lives inside
-# the parent repo, we use a relative copy in the build context.
+# The Python sources (snapgpu/, gateway/, worker/, pyproject.toml) are checked
+# into this repo alongside the Dockerfile — no git clone of the parent needed.
 
 on:
   push:
@@ -38,22 +36,13 @@ jobs:
           docker system prune -af
           echo "Free space:" && df -h /
 
-      # Pull the snapgpu Python source from the parent ai-gateway repo at the
-      # commit pinned by the submodule. The build needs pyproject.toml +
-      # snapgpu/ + gateway/ + worker/ as build context.
-      - name: Fetch snapgpu Python source from parent repo
+      - name: Verify Python sources exist in build context
         run: |
-          set -e
-          # The parent repo's main branch is the canonical source.
-          PARENT_REPO="https://github.com/marcosremar/ai-gateway.git"
-          PARENT_REF="${SNAPGPU_PARENT_REF:-main}"
-          echo "Cloning $PARENT_REPO @ $PARENT_REF..."
-          git clone --depth 1 --branch "$PARENT_REF" "$PARENT_REPO" /tmp/parle-parent
-          cp /tmp/parle-parent/pyproject.toml snapgpu-runtime/
-          cp -r /tmp/parle-parent/snapgpu  snapgpu-runtime/snapgpu
-          cp -r /tmp/parle-parent/gateway  snapgpu-runtime/gateway
-          cp -r /tmp/parle-parent/worker   snapgpu-runtime/worker
+          echo "Build context contents:"
           ls -la snapgpu-runtime/
+          test -f snapgpu-runtime/pyproject.toml || { echo "ERROR: pyproject.toml missing"; exit 1; }
+          test -d snapgpu-runtime/snapgpu || { echo "ERROR: snapgpu/ missing"; exit 1; }
+          test -d snapgpu-runtime/gateway || { echo "ERROR: gateway/ missing"; exit 1; }
 
       - uses: docker/setup-buildx-action@v3
 
