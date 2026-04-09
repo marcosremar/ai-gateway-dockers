@@ -86,12 +86,12 @@ RUN cp -r /app/trellis2/o-voxel /tmp/extensions/o-voxel && \
 # ── trellis2 package (add to Python path since no setup.py) ──
 ENV PYTHONPATH="/app/trellis2:${PYTHONPATH}"
 
-# Pre-download the 4B model (~15GB)
-RUN python -c "\
-from huggingface_hub import snapshot_download; \
-snapshot_download('microsoft/TRELLIS.2-4B'); \
-print('Model downloaded'); \
-" || echo "WARN: model pre-download failed — will download on first request"
+# Model is downloaded on first request (NOT pre-baked) to keep the image
+# small (~5GB instead of ~30GB) and avoid Vast.ai pull timeouts on slow
+# residential hosts. The HuggingFace download takes ~2-5 min on a GPU host
+# with good bandwidth, after which subsequent requests are instant.
+# Set HF_HOME to /workspace if available (Vast.ai mounts persistent storage there)
+ENV HF_HOME=/root/.cache/huggingface
 
 # Copy server
 COPY server.py /app/server.py
