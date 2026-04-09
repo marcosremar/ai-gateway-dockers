@@ -73,13 +73,24 @@ def load_model():
         raise
 
 
-@app.on_event("startup")
-async def startup():
-    """Pre-load the model so the first request doesn't wait."""
+def _load_model_thread():
+    """Background thread that loads the model without blocking startup."""
     try:
         load_model()
     except Exception as e:
-        log.error(f"Startup model load failed (will retry on first request): {e}")
+        log.error(f"Background model load failed: {e}")
+
+
+@app.on_event("startup")
+async def startup():
+    """Start the model load in a background thread so /health responds
+    immediately. The gateway's health check uses /health which returns
+    {status: 'loading'} until the model is ready. Without this, the 15GB
+    HuggingFace download blocks the FastAPI bind() and the gateway times
+    out before the port is even open."""
+    import threading
+    log.info("Starting background model load...")
+    threading.Thread(target=_load_model_thread, daemon=True).start()
 
 
 # ── Endpoints ──
