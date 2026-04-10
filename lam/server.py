@@ -127,14 +127,32 @@ app = FastAPI(title="LAM — Large Avatar Model", lifespan=lifespan)
 
 @app.get("/health")
 async def health():
-    ready = service_status.get("model") == "ready"
+    model = service_status.get("model", "pending")
+    if model == "ready":
+        status_str  = "ok"
+        status_code = 200
+        error_msg   = None
+    elif isinstance(model, str) and model.startswith("error:"):
+        # Permanent load failure — HTTP 200 so the gateway can read JSON
+        # and fail-fast with the actual error message (not a generic timeout).
+        status_str  = "error"
+        status_code = 200
+        error_msg   = model
+    else:
+        # Still loading — HTTP 200 keeps the gateway in polling mode
+        # (avoids the 5-min boot timeout that triggers on repeated 503s).
+        status_str  = "loading"
+        status_code = 200
+        error_msg   = None
+
     return JSONResponse(
-        status_code=200 if ready else 503,
+        status_code=status_code,
         content={
-            "status":     "ok" if ready else "loading",
+            "status":     status_str,
             "service":    "lam",
             "device":     DEVICE,
             "uptime_s":   round(time.time() - boot_time, 1),
+            "error":      error_msg,
             "components": service_status,
         },
     )
