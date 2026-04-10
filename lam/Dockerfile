@@ -82,6 +82,7 @@ RUN pip install --no-cache-dir \
     "loguru" \
     "ninja" \
     "Cython" \
+    "matplotlib" \
     "fastapi>=0.115.0" \
     "uvicorn[standard]>=0.32.0" \
     "python-multipart" \
