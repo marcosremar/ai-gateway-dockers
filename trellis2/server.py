@@ -406,16 +406,31 @@ def _generate_glb(image: Image.Image, seed: int = 0) -> tuple[str, dict]:
         tex_slat_sampler_params={"steps": STEPS},
     )
 
-    # Export to GLB
+    # Export to GLB. TRELLIS.2's to_glb() signature is significantly
+    # different from TRELLIS.1: it requires coords, attr_layout, and aabb
+    # in addition to vertices/faces/attr_volume. The MeshWithVoxel object
+    # carries all of these as attributes (.coords, .layout, .voxel_size,
+    # .voxel_shape) — see trellis2/example.py for the canonical pattern.
+    # The aabb is hardcoded to a centered unit cube because that's the
+    # coordinate space TRELLIS.2 normalizes outputs into.
     from o_voxel.postprocess import to_glb
     mesh = outputs[0]
+    # Required by nvdiffrast — limits triangle count to 16M, which is
+    # what example.py recommends.
+    mesh.simplify(16777216)
     glb = to_glb(
         vertices=mesh.vertices,
         faces=mesh.faces,
         attr_volume=mesh.attrs,
+        coords=mesh.coords,
+        attr_layout=mesh.layout,
+        voxel_size=mesh.voxel_size,
+        aabb=[[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
         decimation_target=DECIMATION,
         texture_size=TEXTURE_SIZE,
         remesh=True,
+        remesh_band=1,
+        remesh_project=0,
     )
 
     # Save to temp file

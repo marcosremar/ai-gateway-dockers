@@ -114,6 +114,16 @@ RUN cp -r /app/trellis2/o-voxel /tmp/extensions/o-voxel && \
     pip install --no-cache-dir /tmp/extensions/o-voxel --no-build-isolation \
     || echo "WARN: o-voxel failed"
 
+# ── Patch trellis2 for newer transformers DINOv3 layout ──
+# Newer transformers wraps the DINOv3 ViT encoder in an extra `.model`
+# attribute, so the transformer blocks live at `self.model.model.layer`
+# instead of `self.model.layer`. The trellis2 image_feature_extractor
+# hardcodes the old path. Sed it to the new one. Without this, every
+# inference call dies with: 'DINOv3ViTModel' object has no attribute 'layer'
+RUN sed -i 's|self\.model\.layer|self.model.model.layer|' \
+    /app/trellis2/trellis2/modules/image_feature_extractor.py && \
+    grep -q 'self.model.model.layer' /app/trellis2/trellis2/modules/image_feature_extractor.py
+
 # ── trellis2 package (add to Python path since no setup.py) ──
 # nvdiffrast is already on PYTHONPATH from above; append trellis2.
 ENV PYTHONPATH="/app/trellis2:/opt/nvdiffrast"
