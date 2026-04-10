@@ -45,6 +45,16 @@ RUN cd /tmp \
     && (cp plugins/cuda/cuda_plugin.so /opt/criu/lib/ 2>/dev/null || true) \
     && cd / && rm -rf /tmp/criu
 
+# ── Install cuda-checkpoint (called by cuda_plugin.so during GPU memory dump/restore) ──
+# cuda_plugin.so forks cuda-checkpoint at runtime to freeze/restore the CUDA context.
+# Without it in PATH, criu dump fails with "check that cuda-checkpoint is present in $PATH".
+# Validated: 570.x binary works with driver 570+ (tested on TensorDock RTX 3090, driver 570.144).
+RUN cd /tmp \
+    && git clone --depth 1 https://github.com/NVIDIA/cuda-checkpoint.git \
+    && cp cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /opt/criu/bin/ \
+    && chmod +x /opt/criu/bin/cuda-checkpoint \
+    && rm -rf /tmp/cuda-checkpoint
+
 # ── Final image ───────────────────────────────────────────────────────────
 FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04
 
@@ -71,11 +81,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # ── Copy CRIU binaries from builder stage ──────────────────────────────────
 COPY --from=criu-builder /opt/criu/bin/criu /usr/local/bin/criu
+COPY --from=criu-builder /opt/criu/bin/cuda-checkpoint /usr/local/bin/cuda-checkpoint
 COPY --from=criu-builder /opt/criu/lib/ /usr/local/lib/criu/
-RUN chmod +x /usr/local/bin/criu \
+RUN chmod +x /usr/local/bin/criu /usr/local/bin/cuda-checkpoint \
     # Verify CRIU works at build time (fails fast if deps are missing)
     && criu --version \
-    # Install cuda_plugin.so where CRIU expects it
+    # Install cuda_plugin.so where CRIU expects it (CRIU scans /usr/lib/criu/ for plugins)
     && mkdir -p /usr/lib/criu \
     && (cp /usr/local/lib/criu/cuda_plugin.so /usr/lib/criu/ 2>/dev/null || echo "No cuda_plugin.so — GPU snapshots disabled")
 
@@ -88,6 +99,9 @@ COPY pyproject.toml /app/pyproject.toml
 COPY snapgpu/ /app/snapgpu/
 COPY gateway/ /app/gateway/
 COPY worker/ /app/worker/
+# Install boto3 explicitly before -e install to avoid layer cache misses
+# where an older pyproject.toml (without boto3) was cached
+RUN pip install --no-cache-dir "boto3>=1.34.0"
 RUN pip install --no-cache-dir -e /app
 
 # ── Healthcheck ───────────────────────────────────────────────────────────

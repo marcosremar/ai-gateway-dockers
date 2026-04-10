@@ -13,10 +13,17 @@ _cuda_ckpt_ok: bool | None = None
 
 
 def _check_criu() -> bool:
-    """Return True only if criu is installed AND executable (not just in PATH).
+    """Return True only if criu is installed, executable, AND the process has the
+    required capabilities in its bounding set.
 
-    A binary with file capabilities set beyond the container's bounding set will
-    be found by shutil.which() but raise PermissionError (rc=126) on exec.
+    IMPORTANT: `criu check` checks KERNEL features (namespace support, etc.), NOT
+    process capabilities. A container without CAP_CHECKPOINT_RESTORE passes `criu check`
+    but fails `criu dump` with "needs CAP_SYS_ADMIN or CAP_CHECKPOINT_RESTORE".
+
+    We read /proc/self/status CapBnd directly:
+      CAP_SYS_ADMIN = bit 21       (granted by --privileged)
+      CAP_CHECKPOINT_RESTORE = bit 40  (granted by --cap-add CHECKPOINT_RESTORE)
+    Either bit being set in CapBnd means CRIU can checkpoint/restore.
     """
     global _criu_ok
     if _criu_ok is not None:
@@ -25,11 +32,23 @@ def _check_criu() -> bool:
         _criu_ok = False
         return False
     try:
-        result = subprocess.run(
-            ["criu", "--version"],
-            capture_output=True, timeout=5,
-        )
-        _criu_ok = result.returncode == 0
+        # Verify the binary is executable (catches broken setcap giving rc=126)
+        ver = subprocess.run(["criu", "--version"], capture_output=True, timeout=5)
+        if ver.returncode != 0:
+            _criu_ok = False
+            return False
+        # Check process capability bounding set directly from /proc
+        # `criu check` checks kernel features, NOT process caps — don't use it.
+        cap_bnd = 0
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("CapBnd:"):
+                    cap_bnd = int(line.split(":")[1].strip(), 16)
+                    break
+        CAP_SYS_ADMIN = 21
+        CAP_CHECKPOINT_RESTORE = 40
+        has_cap = bool(cap_bnd & (1 << CAP_CHECKPOINT_RESTORE)) or bool(cap_bnd & (1 << CAP_SYS_ADMIN))
+        _criu_ok = has_cap
     except Exception:
         _criu_ok = False
     return _criu_ok
