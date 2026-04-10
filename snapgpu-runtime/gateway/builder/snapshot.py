@@ -73,9 +73,14 @@ class SnapshotManager:
     def criu_available(self) -> bool:
         if self._criu_available is None:
             try:
-                subprocess.run(["criu", "--version"], capture_output=True, timeout=5)
-                self._criu_available = True
-            except (FileNotFoundError, subprocess.TimeoutExpired):
+                result = subprocess.run(
+                    ["criu", "--version"], capture_output=True, timeout=5
+                )
+                self._criu_available = result.returncode == 0
+            except Exception:
+                # FileNotFoundError: not installed
+                # PermissionError / OSError (rc=126): binary has file capabilities
+                #   set beyond the container's bounding set — unexecutable
                 self._criu_available = False
         return self._criu_available
 
@@ -83,9 +88,11 @@ class SnapshotManager:
     def cuda_checkpoint_available(self) -> bool:
         if self._cuda_checkpoint_available is None:
             try:
-                subprocess.run(["cuda-checkpoint", "--help"], capture_output=True, timeout=5)
-                self._cuda_checkpoint_available = True
-            except (FileNotFoundError, subprocess.TimeoutExpired):
+                result = subprocess.run(
+                    ["cuda-checkpoint", "--help"], capture_output=True, timeout=5
+                )
+                self._cuda_checkpoint_available = result.returncode == 0
+            except Exception:
                 self._cuda_checkpoint_available = False
         return self._cuda_checkpoint_available
 

@@ -16,20 +16,6 @@ if ! command -v criu > /dev/null 2>&1; then
 fi
 echo "[snapgpu-start] criu version: $(criu --version 2>&1 | head -1)"
 
-# ── CRIU capabilities ─────────────────────────────────────────────────────
-# CRIU needs CAP_CHECKPOINT_RESTORE (or CAP_SYS_ADMIN) to dump processes.
-# On Vast.ai/RunPod the container runs as root but without SYS_ADMIN in the
-# host user namespace. We grant cap_checkpoint_restore directly to the binary
-# via setcap — this works as long as we're root, requires no host namespace
-# privilege, and persists for the lifetime of the container.
-CRIU_BIN=$(command -v criu)
-if setcap cap_checkpoint_restore+eip "$CRIU_BIN" 2>/dev/null; then
-    echo "[snapgpu-start] granted cap_checkpoint_restore to $CRIU_BIN"
-elif setcap cap_sys_admin+eip "$CRIU_BIN" 2>/dev/null; then
-    echo "[snapgpu-start] granted cap_sys_admin to $CRIU_BIN (fallback)"
-else
-    echo "[snapgpu-start] WARN: could not grant capabilities to criu — snapshots may fail"
-fi
 
 # Check CUDA plugin for GPU memory snapshots
 if [ -f /usr/lib/criu/cuda_plugin.so ]; then
