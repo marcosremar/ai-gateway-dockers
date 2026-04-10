@@ -7,14 +7,57 @@ Requires CRIU and optionally cuda-checkpoint for GPU memory snapshots.
 """
 
 from __future__ import annotations
+import io
+import json
 import os
 import subprocess
+import tarfile
 import uuid
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Optional
 
 from ..db import get_session, SnapshotModel
+
+
+# ── S3 config ────────────────────────────────────────────────────────────────
+
+def _s3_client():
+    """Return a boto3 S3 client configured from env vars, or None if not set.
+
+    Required env vars:
+        SNAPGPU_S3_ENDPOINT    e.g. https://<account>.r2.cloudflarestorage.com
+        SNAPGPU_S3_BUCKET      bucket name
+        SNAPGPU_S3_ACCESS_KEY  access key ID
+        SNAPGPU_S3_SECRET_KEY  secret access key
+
+    Optional:
+        SNAPGPU_S3_REGION      default 'auto' (correct for R2; use region for AWS)
+        SNAPGPU_S3_KEY_PREFIX  default 'snapgpu/'
+    """
+    endpoint = os.environ.get("SNAPGPU_S3_ENDPOINT", "")
+    bucket = os.environ.get("SNAPGPU_S3_BUCKET", "")
+    access_key = os.environ.get("SNAPGPU_S3_ACCESS_KEY", "")
+    secret_key = os.environ.get("SNAPGPU_S3_SECRET_KEY", "")
+    if not (endpoint and bucket and access_key and secret_key):
+        return None, None
+    try:
+        import boto3
+        client = boto3.client(
+            "s3",
+            endpoint_url=endpoint,
+            aws_access_key_id=access_key,
+            aws_secret_access_key=secret_key,
+            region_name=os.environ.get("SNAPGPU_S3_REGION", "auto"),
+        )
+        return client, bucket
+    except Exception as e:
+        print(f"[snapshot] S3 client init failed: {e}")
+        return None, None
+
+
+def _s3_key_prefix() -> str:
+    return os.environ.get("SNAPGPU_S3_KEY_PREFIX", "snapgpu/").rstrip("/") + "/"
 
 
 class SnapshotManager:
@@ -105,7 +148,9 @@ class SnapshotManager:
             )
 
             if result.returncode != 0:
-                print(f"[snapshot] CRIU dump failed: {result.stderr}")
+                print(f"[snapshot] CRIU dump failed (rc={result.returncode}):")
+                if result.stdout: print(f"  stdout: {result.stdout.strip()}")
+                if result.stderr: print(f"  stderr: {result.stderr.strip()}")
                 return None
 
             # Calculate snapshot size
@@ -127,6 +172,10 @@ class SnapshotManager:
                 session.commit()
 
             print(f"[snapshot] Created {snapshot_id} ({size_bytes / 1024 / 1024:.1f}MB, GPU={gpu_included})")
+
+            # Auto-upload to S3 if configured (background — don't block inference)
+            self._upload_to_s3(snapshot_id, snapshot_path, app_name)
+
             return snapshot_id
 
         except subprocess.TimeoutExpired:
@@ -202,3 +251,134 @@ class SnapshotManager:
                 shutil.rmtree(snapshot.snapshot_path, ignore_errors=True)
                 session.delete(snapshot)
                 session.commit()
+
+    # ── S3 persistence ───────────────────────────────────────────────────────
+
+    def _upload_to_s3(self, snapshot_id: str, snapshot_path: Path, app_name: str) -> bool:
+        """Compress snapshot dir and upload to S3 as latest + versioned tar.gz.
+
+        Key schema:
+            {prefix}{app_name}/latest.tar.gz        ← always newest
+            {prefix}{app_name}/{snapshot_id}.tar.gz ← versioned backup
+            {prefix}{app_name}/manifest.json        ← metadata for quick lookup
+        """
+        s3, bucket = _s3_client()
+        if not s3:
+            return False
+
+        prefix = _s3_key_prefix()
+        try:
+            # Compress snapshot dir in-memory
+            buf = io.BytesIO()
+            with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+                tar.add(str(snapshot_path), arcname=snapshot_id)
+            compressed = buf.getvalue()
+            size_mb = len(compressed) / 1024 / 1024
+            print(f"[snapshot] Uploading {snapshot_id} to S3 ({size_mb:.1f}MB)...")
+
+            versioned_key = f"{prefix}{app_name}/{snapshot_id}.tar.gz"
+            latest_key = f"{prefix}{app_name}/latest.tar.gz"
+
+            s3.put_object(Bucket=bucket, Key=versioned_key, Body=compressed, ContentType="application/gzip")
+            s3.put_object(Bucket=bucket, Key=latest_key, Body=compressed, ContentType="application/gzip")
+
+            # Write manifest
+            manifest = {
+                "snapshot_id": snapshot_id,
+                "app_name": app_name,
+                "size_bytes": len(compressed),
+                "uploaded_at": datetime.now(timezone.utc).isoformat(),
+            }
+            s3.put_object(
+                Bucket=bucket,
+                Key=f"{prefix}{app_name}/manifest.json",
+                Body=json.dumps(manifest).encode(),
+                ContentType="application/json",
+            )
+            print(f"[snapshot] S3 upload complete: {latest_key} ({size_mb:.1f}MB)")
+            return True
+        except Exception as e:
+            print(f"[snapshot] S3 upload failed: {e}")
+            return False
+
+    def download_from_s3(self, app_name: str) -> Optional[str]:
+        """Download latest snapshot from S3, extract locally, register in DB.
+
+        Returns the local snapshot_id on success, None if unavailable.
+        Called by start.sh / lifespan before the first restore request.
+        """
+        s3, bucket = _s3_client()
+        if not s3:
+            return None
+
+        prefix = _s3_key_prefix()
+        manifest_key = f"{prefix}{app_name}/manifest.json"
+        latest_key = f"{prefix}{app_name}/latest.tar.gz"
+
+        try:
+            # Read manifest to get snapshot_id
+            resp = s3.get_object(Bucket=bucket, Key=manifest_key)
+            manifest = json.loads(resp["Body"].read())
+            remote_snapshot_id = manifest["snapshot_id"]
+
+            # Check if already downloaded locally
+            with get_session() as session:
+                from sqlmodel import select
+                existing = session.exec(
+                    select(SnapshotModel).where(SnapshotModel.snapshot_id == remote_snapshot_id)
+                ).first()
+            if existing and Path(existing.snapshot_path).exists():
+                print(f"[snapshot] S3 snapshot {remote_snapshot_id} already local — skipping download")
+                return remote_snapshot_id
+
+            print(f"[snapshot] Downloading snapshot {remote_snapshot_id} from S3...")
+            resp = s3.get_object(Bucket=bucket, Key=latest_key)
+            compressed = resp["Body"].read()
+            size_mb = len(compressed) / 1024 / 1024
+            print(f"[snapshot] Downloaded {size_mb:.1f}MB — extracting...")
+
+            # Extract to snapshot dir
+            buf = io.BytesIO(compressed)
+            with tarfile.open(fileobj=buf, mode="r:gz") as tar:
+                tar.extractall(str(self.snapshot_dir))
+
+            snapshot_path = self.snapshot_dir / remote_snapshot_id
+            if not snapshot_path.exists():
+                print(f"[snapshot] Extract failed: {snapshot_path} not found")
+                return None
+
+            size_bytes = sum(f.stat().st_size for f in snapshot_path.rglob("*") if f.is_file())
+
+            # Register in local DB
+            with get_session() as session:
+                model = SnapshotModel(
+                    snapshot_id=remote_snapshot_id,
+                    app_name=app_name,
+                    snapshot_path=str(snapshot_path),
+                    size_bytes=size_bytes,
+                    gpu_memory_included=True,
+                )
+                session.add(model)
+                session.commit()
+
+            print(f"[snapshot] S3 snapshot {remote_snapshot_id} ready for restore")
+            return remote_snapshot_id
+
+        except s3.exceptions.NoSuchKey:
+            print(f"[snapshot] No S3 snapshot found for app '{app_name}' — cold start")
+            return None
+        except Exception as e:
+            print(f"[snapshot] S3 download failed: {e}")
+            return None
+
+    def s3_manifest(self, app_name: str) -> Optional[dict]:
+        """Return the S3 manifest for an app, or None if not found."""
+        s3, bucket = _s3_client()
+        if not s3:
+            return None
+        prefix = _s3_key_prefix()
+        try:
+            resp = s3.get_object(Bucket=bucket, Key=f"{prefix}{app_name}/manifest.json")
+            return json.loads(resp["Body"].read())
+        except Exception:
+            return None
