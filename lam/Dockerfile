@@ -112,11 +112,19 @@ RUN pip install --no-cache-dir \
 # ── Build FaceBoxesV2 C extension ─────────────────────────────────────────────
 RUN cd /app/lam/external/landmark_detection/FaceBoxesV2/utils && bash make.sh
 
-# ── Download assets at build time (FLAME templates, motions ~500MB) ──────────
-RUN python3 -c "\
-from huggingface_hub import snapshot_download; \
-import os; os.environ['HF_HOME']='/app/.cache/huggingface'; \
-snapshot_download('3DAIGC/LAM-assets', local_dir='/app/lam/assets')"
+# ── Download + extract LAM assets (LAM_assets.tar + thirdparty_models.tar) ──
+# Must be extracted inside /app/lam — tars contain pretrained_models/, ckpts/, etc.
+RUN huggingface-cli download 3DAIGC/LAM-assets \
+        LAM_assets.tar thirdparty_models.tar \
+        --local-dir /app/lam/tmp && \
+    cd /app/lam && \
+    tar -xf tmp/LAM_assets.tar      && rm tmp/LAM_assets.tar && \
+    tar -xf tmp/thirdparty_models.tar && rm tmp/thirdparty_models.tar && \
+    rm -rf tmp
+
+# ── Download LAM-20K model to the path LAM expects ──────────────────────────
+RUN huggingface-cli download 3DAIGC/LAM-20K \
+        --local-dir /app/lam/model_zoo/lam_models/releases/lam/lam-20k/step_045500/
 
 # ── App files ────────────────────────────────────────────────────────────────
 COPY server.py start.sh /app/
