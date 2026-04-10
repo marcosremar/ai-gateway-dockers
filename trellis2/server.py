@@ -393,12 +393,17 @@ def _generate_glb(image: Image.Image, seed: int = 0) -> tuple[str, dict]:
         image = image.convert("RGBA")
 
     # Run the 3-stage pipeline
+    # NOTE: TRELLIS.2 uses THREE sampler params (not two like TRELLIS.1):
+    #   - sparse_structure_sampler_params: voxel grid sampling
+    #   - shape_slat_sampler_params: shape latent sampling
+    #   - tex_slat_sampler_params: texture latent sampling
     log.info(f"Generating 3D mesh (resolution={RESOLUTION}, steps={STEPS}, seed={seed}) ...")
     outputs = pipeline.run(
         image,
         seed=seed,
         sparse_structure_sampler_params={"steps": STEPS},
-        slat_sampler_params={"steps": STEPS},
+        shape_slat_sampler_params={"steps": STEPS},
+        tex_slat_sampler_params={"steps": STEPS},
     )
 
     # Export to GLB
