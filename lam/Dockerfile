@@ -86,7 +86,8 @@ RUN pip install --no-cache-dir \
     "fastapi>=0.115.0" \
     "uvicorn[standard]>=0.32.0" \
     "python-multipart" \
-    "aiofiles"
+    "aiofiles" \
+    "pygltflib>=1.16.0"
 
 # ── TensorFlow (for face-detection-tflite) ───────────────────────────────────
 RUN pip install --no-cache-dir \
