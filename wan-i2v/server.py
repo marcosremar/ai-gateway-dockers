@@ -23,7 +23,7 @@ import os
 import sys
 import time
 import tempfile
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from typing import Optional
 
 import numpy as np
@@ -231,16 +231,19 @@ def generate(req: GenerateRequest):
     # ── Generate video ──
     t0 = time.time()
     try:
-        output = pipeline(
-            image=image,
-            prompt=prompt,
-            negative_prompt=req.negative_prompt,
-            height=req.height,
-            width=req.width,
-            num_frames=req.num_frames,
-            guidance_scale=req.guidance_scale,
-            num_inference_steps=req.num_inference_steps,
-        )
+        # autocast ensures input/bias dtypes match when using cpu_offload
+        ctx = torch.autocast("cuda", dtype=torch.bfloat16) if args.device == "cuda" else nullcontext()
+        with ctx:
+            output = pipeline(
+                image=image,
+                prompt=prompt,
+                negative_prompt=req.negative_prompt,
+                height=req.height,
+                width=req.width,
+                num_frames=req.num_frames,
+                guidance_scale=req.guidance_scale,
+                num_inference_steps=req.num_inference_steps,
+            )
         frames = output.frames[0]  # list of PIL Images
     except Exception as e:
         raise HTTPException(500, detail=f"Erro na geração: {e}")
