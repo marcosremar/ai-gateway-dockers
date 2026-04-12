@@ -82,9 +82,9 @@ COPY start.sh        /app/start.sh
 COPY idle_watchdog.py /app/idle_watchdog.py
 RUN chmod +x /app/start.sh
 
-EXPOSE 8095
+EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=180s --retries=5 \
-    CMD curl -f http://localhost:8095/health || exit 1
+    CMD curl -f http://localhost:8000/health || exit 1
 
 CMD ["/app/start.sh"]

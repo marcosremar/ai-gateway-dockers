@@ -37,7 +37,7 @@ import uvicorn
 # ── Args ──────────────────────────────────────────────────────────────────────
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--port",        type=int,  default=8095)
+parser.add_argument("--port",        type=int,  default=int(os.environ.get("PORT", "8000")))
 parser.add_argument("--device",      type=str,  default="cuda", choices=["cuda", "cpu"])
 parser.add_argument("--cpu-offload", action="store_true", default=True,
                     help="Habilita CPU offload — permite rodar com menos VRAM (16GB+)")
