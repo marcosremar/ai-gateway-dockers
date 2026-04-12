@@ -25,7 +25,7 @@ from pathlib import Path
 import torch
 import uvicorn
 from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -185,22 +185,28 @@ async def rig_model(file: UploadFile = File(...)):
         if not os.path.exists(output_path):
             raise HTTPException(500, detail="Pipeline completed but output file not found")
 
-        return FileResponse(
-            output_path,
+        # Read file into memory so we can return it and cleanup the temp dir
+        with open(output_path, "rb") as f:
+            result_bytes = f.read()
+
+        # Cleanup temp dir now that we have the bytes
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+        return Response(
+            content=result_bytes,
             media_type="model/gltf-binary",
-            filename="rigged.glb",
-            headers={"X-Duration-Seconds": f"{duration:.1f}"},
+            headers={
+                "Content-Disposition": "attachment; filename=rigged.glb",
+                "X-Duration-Seconds": f"{duration:.1f}",
+            },
         )
 
     except HTTPException:
         raise
     except Exception as e:
         log.error(f"Rigging failed: {e}\n{traceback.format_exc()}")
+        shutil.rmtree(tmp_dir, ignore_errors=True)
         raise HTTPException(500, detail=f"Rigging failed: {e}")
-    finally:
-        # Cleanup after response is sent (FileResponse streams the file)
-        # We can't delete immediately — FastAPI needs the file for streaming
-        pass
 
 
 @app.get("/diag")
