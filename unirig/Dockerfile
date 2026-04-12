@@ -33,8 +33,11 @@ WORKDIR /app/unirig
 # bpy (Blender Python API)
 RUN pip install --no-cache-dir bpy
 
+# Remove system blinker that blocks pip (distutils-installed)
+RUN rm -rf /usr/lib/python3/dist-packages/blinker* 2>/dev/null; true
+
 # Core Python deps
-RUN pip install --no-cache-dir --ignore-installed \
+RUN pip install --no-cache-dir \
     transformers==4.51.3 python-box einops omegaconf \
     pytorch_lightning lightning addict timm fast-simplification \
     trimesh open3d huggingface_hub \
