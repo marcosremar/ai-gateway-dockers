@@ -42,8 +42,8 @@ parser.add_argument("--device",      type=str,  default="cuda", choices=["cuda",
 parser.add_argument("--cpu-offload", action="store_true", default=True,
                     help="Habilita CPU offload — permite rodar com menos VRAM (16GB+)")
 parser.add_argument("--model-id",    type=str,
-                    default="Wan-AI/Wan2.1-I2V-14B-480P",
-                    help="HuggingFace model ID")
+                    default=os.environ.get("MODEL_ID", "Wan-AI/Wan2.1-I2V-14B-480P-Diffusers"),
+                    help="HuggingFace model ID (diffusers format)")
 args, _ = parser.parse_known_args()
 
 # ── Prompt presets para cenas panorâmicas ─────────────────────────────────────
