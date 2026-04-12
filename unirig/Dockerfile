@@ -36,7 +36,7 @@ RUN git clone --depth 1 https://github.com/VAST-AI-Research/UniRig.git /app/unir
 WORKDIR /app/unirig
 
 # Core Python deps (NO flash_attn — optional optimization, causes OOM)
-RUN pip install --no-cache-dir \
+RUN pip install --no-cache-dir --ignore-installed \
     transformers==4.51.3 python-box einops omegaconf \
     pytorch_lightning lightning addict timm fast-simplification \
     trimesh open3d huggingface_hub numpy==1.26.4 \
