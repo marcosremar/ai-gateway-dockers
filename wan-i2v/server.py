@@ -185,7 +185,9 @@ def health():
         except Exception:
             pass
     return {
-        "status": "ok" if model_loaded else ("error" if load_error else "loading"),
+        # Always "ok" so the gateway health probe passes during model download.
+        # Check model_loaded to know if /generate is ready. Use load_error for failures.
+        "status": "error" if load_error else "ok",
         "model": args.model_id,
         "device": args.device,
         "cpu_offload": args.cpu_offload,
