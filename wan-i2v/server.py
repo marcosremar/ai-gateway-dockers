@@ -82,9 +82,10 @@ NEGATIVE_PROMPT = (
 pipeline = None
 model_loaded = False
 load_error: Optional[str] = None
+load_traceback: Optional[str] = None
 
 def load_pipeline():
-    global pipeline, model_loaded, load_error
+    global pipeline, model_loaded, load_error, load_traceback
     try:
         print(f"[wan-i2v] Carregando modelo: {args.model_id}", flush=True)
         print(f"[wan-i2v] Device: {args.device} | CPU offload: {args.cpu_offload}", flush=True)
@@ -111,8 +112,11 @@ def load_pipeline():
         print(f"[wan-i2v] Modelo carregado em {time.time()-t0:.1f}s", flush=True)
 
     except Exception as e:
+        import traceback as tb
         load_error = str(e)
+        load_traceback = tb.format_exc()
         print(f"[wan-i2v] ERRO ao carregar modelo: {e}", flush=True, file=sys.stderr)
+        print(load_traceback, flush=True, file=sys.stderr)
 
 
 @asynccontextmanager
@@ -182,6 +186,9 @@ def health():
         "cpu_offload": args.cpu_offload,
         "model_loaded": model_loaded,
         "load_error": load_error,
+        # Gateway reads "error" key for fail-fast detection
+        "error": load_error if load_error else None,
+        "error_traceback": load_traceback if load_traceback else None,
         "cuda_available": torch.cuda.is_available(),
         "vram_gb": vram_gb,
     }

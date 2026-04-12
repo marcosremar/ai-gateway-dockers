@@ -30,8 +30,6 @@ ENV DEBIAN_FRONTEND=noninteractive \
     CPU_OFFLOAD=1 \
     IDLE_TIMEOUT_MIN=15 \
     HF_HOME=/root/.cache/huggingface \
-    HF_XET_HIGH_PERFORMANCE=1 \
-    HF_XET_FIXED_DOWNLOAD_CONCURRENCY=50 \
     TORCHINDUCTOR_CACHE_DIR=/workspace/.torch-cache \
     TORCHINDUCTOR_FX_GRAPH_CACHE=1 \
     TORCHINDUCTOR_AUTOGRAD_CACHE=1
@@ -59,11 +57,10 @@ RUN pip install --no-cache-dir \
 # ── Diffusers + HF stack ──────────────────────────────────────────────────────
 # diffusers 0.33+ required for WanImageToVideoPipeline
 RUN pip install --no-cache-dir \
-    "diffusers>=0.33.0" \
-    "transformers>=4.45.0" \
-    "accelerate>=0.34.0" \
-    "huggingface-hub>=1.0.0" \
-    "hf_xet>=1.4.0" \
+    "diffusers==0.33.1" \
+    "transformers>=4.45.0,<5.0" \
+    "accelerate>=0.34.0,<2.0" \
+    "huggingface-hub>=0.27.0,<2.0" \
     sentencepiece tokenizers \
     safetensors
 
