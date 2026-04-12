@@ -62,7 +62,7 @@ RUN pip install --no-cache-dir \
     "accelerate>=0.34.0,<2.0" \
     "huggingface-hub>=0.27.0,<2.0" \
     sentencepiece tokenizers \
-    safetensors
+    safetensors ftfy
 
 # ── Server deps ───────────────────────────────────────────────────────────────
 RUN pip install --no-cache-dir \
