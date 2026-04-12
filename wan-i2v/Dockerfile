@@ -51,13 +51,15 @@ RUN chmod +x /usr/local/bin/hf-download
 WORKDIR /app
 
 # ── PyTorch CUDA 12.4 ─────────────────────────────────────────────────────────
+# torch 2.5.1: fixes infer_schema incompatibility with diffusers Wan autoencoder
 RUN pip install --no-cache-dir \
-    torch==2.4.1 torchvision==0.19.1 \
+    torch==2.5.1 torchvision==0.20.1 \
     --index-url https://download.pytorch.org/whl/cu124
 
 # ── Diffusers + HF stack ──────────────────────────────────────────────────────
+# diffusers 0.33+ required for WanImageToVideoPipeline
 RUN pip install --no-cache-dir \
-    "diffusers>=0.32.0" \
+    "diffusers>=0.33.0" \
     "transformers>=4.45.0" \
     "accelerate>=0.34.0" \
     "huggingface-hub>=1.0.0" \
