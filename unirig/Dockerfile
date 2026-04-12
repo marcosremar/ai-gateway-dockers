@@ -18,14 +18,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN python -m pip install --upgrade pip setuptools wheel
 
 # PyTorch 2.5.1 for CUDA 12.1 (pinned — torch_cluster/scatter need matching wheels)
-RUN pip install --no-cache-dir torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cu121
+RUN pip install --no-cache-dir torch==2.5.1+cu121 torchvision==0.20.1+cu121 \
+    --index-url https://download.pytorch.org/whl/cu121
+
+# Pin torch so no later dep can upgrade it
+RUN echo "torch==2.5.1+cu121" > /etc/pip-constraints.txt
+ENV PIP_CONSTRAINT=/etc/pip-constraints.txt
 
 # Clone UniRig
 RUN git clone --depth 1 https://github.com/VAST-AI-Research/UniRig.git /app/unirig
 
 WORKDIR /app/unirig
 
-# bpy (Blender Python API — pip version, not full Blender)
+# bpy (Blender Python API)
 RUN pip install --no-cache-dir bpy
 
 # Core Python deps
@@ -41,6 +46,10 @@ RUN pip install --no-cache-dir spconv-cu121
 # torch_scatter + torch_cluster (must match torch 2.5.1 + cu121)
 RUN pip install --no-cache-dir torch_scatter torch_cluster \
     -f https://data.pyg.org/whl/torch-2.5.1+cu121.html
+
+# Verify torch version is still 2.5.1 (fail build if anything upgraded it)
+RUN python -c "import torch; v=torch.__version__; assert '2.5.1' in v, f'torch was upgraded to {v}!'; print(f'torch {v} OK')"
+RUN python -c "from torch_cluster import fps; print('torch_cluster OK')"
 
 # Pre-download UniRig model weights (~2GB)
 RUN python -c "from huggingface_hub import snapshot_download; snapshot_download('VAST-AI/UniRig', local_dir='/app/unirig/checkpoints')"

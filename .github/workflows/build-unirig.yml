@@ -55,8 +55,7 @@ jobs:
             marcosremar/unirig:${{ github.sha }}
             ghcr.io/marcosremar/unirig:latest
             ghcr.io/marcosremar/unirig:${{ github.sha }}
-          cache-from: type=gha,scope=unirig
-          cache-to: type=gha,mode=max,scope=unirig
+          no-cache: true
 
       - name: Smoke test (CPU mode)
         run: |
