@@ -121,7 +121,12 @@ def load_pipeline():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    load_pipeline()
+    import asyncio
+    # Run model loading in a background thread so the event loop stays responsive.
+    # /health returns {"status": "loading"} while the model downloads/initializes.
+    # This lets the gateway poll /health and see real progress instead of timing out.
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(None, load_pipeline)
     yield
 
 # ── FastAPI app ───────────────────────────────────────────────────────────────
