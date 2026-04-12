@@ -71,23 +71,10 @@ RUN pip install --no-cache-dir \
     pillow "imageio>=2.34.0" imageio-ffmpeg \
     "numpy<2.0"
 
-# ── Pre-bake model weights ────────────────────────────────────────────────────
-# Uses hf-xet with HIGH_PERFORMANCE + FIXED_CONCURRENCY=50 (validated fastest)
-ARG HF_TOKEN=""
-ENV HF_TOKEN=${HF_TOKEN}
-RUN python3 -c "\
-import os; \
-from huggingface_hub import snapshot_download; \
-print('[wan-i2v] Baixando Wan2.1-I2V-14B-480P (~28GB)...'); \
-snapshot_download( \
-    'Wan-AI/Wan2.1-I2V-14B-480P', \
-    max_workers=8, \
-    token=os.environ.get('HF_TOKEN') or None, \
-); \
-print('[wan-i2v] Download concluído.'); \
-" || echo "[wan-i2v] Download falhou — modelo baixado no primeiro boot"
-
 # ── App files ─────────────────────────────────────────────────────────────────
+# Model (~28GB) is downloaded on first boot to the HF cache volume.
+# GitHub Actions runners don't have enough disk for pre-baking.
+# Mount -v wan-i2v-hf-cache:/root/.cache/huggingface to persist across restarts.
 COPY server.py       /app/server.py
 COPY start.sh        /app/start.sh
 COPY idle_watchdog.py /app/idle_watchdog.py

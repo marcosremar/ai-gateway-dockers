@@ -49,8 +49,6 @@ jobs:
           context: wan-i2v
           file: wan-i2v/Dockerfile
           push: true
-          build-args: |
-            HF_TOKEN=${{ secrets.HF_TOKEN }}
           tags: |
             marcosremar/wan-i2v:latest
             marcosremar/wan-i2v:${{ github.sha }}
