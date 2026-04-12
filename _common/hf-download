@@ -63,11 +63,23 @@ URL="https://huggingface.co/${REPO}/resolve/${REVISION}/${FILE}"
 # 11% variance spread. Uses the new Xet storage backend.
 
 if [ "$FORCE_ARIA2" != "1" ] && command -v python3 &>/dev/null; then
-    echo "[hf-download] Python SDK (hf-xet HP+FIXED=50): ${REPO}/${FILE}"
+    # RAM guard: HF_XET_HIGH_PERFORMANCE needs ≥64GB RAM.
+    # On smaller hosts, xet's in-memory dedup can OOM (huggingface_hub#3300).
+    TOTAL_RAM_GB=0
+    if [ -f /proc/meminfo ]; then
+        TOTAL_RAM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+        TOTAL_RAM_GB=$((TOTAL_RAM_KB / 1024 / 1024))
+    fi
+    if [ "$TOTAL_RAM_GB" -lt 64 ] 2>/dev/null; then
+        echo "[hf-download] RAM=${TOTAL_RAM_GB}GB (<64GB) — disabling HF_XET_HIGH_PERFORMANCE to avoid OOM"
+        export HF_XET_HIGH_PERFORMANCE=0
+    fi
+
+    echo "[hf-download] Python SDK (hf-xet FIXED=50): ${REPO}/${FILE}"
     if python3 - <<PYEOF
 import os, sys, shutil
 # hf-xet tuning — validated on Vast.ai RTX 4090 (2026-04-07)
-os.environ.setdefault("HF_XET_HIGH_PERFORMANCE", "1")
+os.environ.setdefault("HF_XET_HIGH_PERFORMANCE", os.environ.get("HF_XET_HIGH_PERFORMANCE", "1"))
 os.environ.setdefault("HF_XET_FIXED_DOWNLOAD_CONCURRENCY", "50")
 os.environ.setdefault("HF_HOME", "$HF_HOME")
 try:
@@ -95,7 +107,38 @@ PYEOF
             exit 0
         fi
     fi
-    echo "[hf-download] HF Hub SDK failed, trying aria2c..."
+    # xet failed — retry with xet disabled (huggingface_hub#3300, xet-core#581)
+    echo "[hf-download] HF Hub SDK (xet) failed — retrying with xet disabled..."
+    if HF_HUB_DISABLE_XET=1 python3 - <<PYEOF
+import os, sys, shutil
+os.environ["HF_HUB_DISABLE_XET"] = "1"
+os.environ.setdefault("HF_HOME", "$HF_HOME")
+try:
+    from huggingface_hub import hf_hub_download
+    path = hf_hub_download(
+        "$REPO",
+        "$FILE",
+        revision="$REVISION",
+        token=os.environ.get("HF_TOKEN") or None,
+    )
+    dest = "$DEST"
+    os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
+    if os.path.realpath(path) != os.path.realpath(dest):
+        shutil.copy2(path, dest)
+    print(f"[hf-download] downloaded via hf_hub_download (xet disabled) -> {dest}")
+except Exception as e:
+    print(f"[hf-download] hf_hub_download (no-xet) error: {e}", file=sys.stderr)
+    sys.exit(1)
+PYEOF
+    then
+        if [ -s "$DEST" ]; then
+            size=$(stat -c%s "$DEST" 2>/dev/null || stat -f%z "$DEST" 2>/dev/null || echo 0)
+            size_mb=$((size / 1024 / 1024))
+            echo "[hf-download] ✓ Downloaded ${size_mb} MB via HF Hub SDK (xet disabled)"
+            exit 0
+        fi
+    fi
+    echo "[hf-download] HF Hub SDK failed (both xet and non-xet), trying aria2c..."
 fi
 
 # ── Method 2: aria2c multi-connection (fallback) ────────────────────────────
