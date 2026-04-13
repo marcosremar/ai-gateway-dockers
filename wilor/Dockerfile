@@ -42,8 +42,15 @@ RUN pip install torch torchvision --index-url https://download.pytorch.org/whl/c
 RUN pip install --no-build-isolation 'git+https://github.com/warmshao/WiLoR-mini.git'
 RUN pip install fastapi uvicorn pillow dill
 
-# Verify wilor_mini can be imported (fail build if not)
-RUN python3 -c "from wilor_mini.pipelines.wilor_hand_pose3d_estimation_pipeline import WiLorHandPose3dEstimationPipeline; print('WiLoR-mini import OK')"
+# Pre-download models at build time so startup is instant (no HuggingFace download)
+# This creates the pipeline once, which triggers all model downloads + caching
+RUN python3 -c "\
+from wilor_mini.pipelines.wilor_hand_pose3d_estimation_pipeline import WiLorHandPose3dEstimationPipeline; \
+import torch; \
+device = torch.device('cpu'); \
+p = WiLorHandPose3dEstimationPipeline(device=device, dtype=torch.float32); \
+print('WiLoR-mini models pre-downloaded OK'); \
+"
 
 # ── Copy API server ──────────────────────────��──────────────────────────────
 COPY server_mini.py /app/server_mini.py
