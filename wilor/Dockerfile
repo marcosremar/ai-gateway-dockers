@@ -39,7 +39,7 @@ WORKDIR /app
 RUN pip install "numpy<2.0" "setuptools<70" wheel
 RUN pip install --no-build-isolation 'git+https://github.com/mattloper/chumpy.git'
 RUN pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
-RUN pip install git+https://github.com/warmshao/WiLoR-mini.git
+RUN pip install --no-build-isolation 'git+https://github.com/warmshao/WiLoR-mini.git'
 RUN pip install fastapi uvicorn pillow dill
 
 # Verify wilor_mini can be imported (fail build if not)
