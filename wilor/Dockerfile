@@ -19,10 +19,19 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 # ── System deps ──────────────────────────────────────────────────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        python3.10 python3.10-dev python3-pip python3.10-venv \
-        build-essential git wget libgl1 libglib2.0-0 && \
-    update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.10 1 && \
+        software-properties-common && \
+    add-apt-repository ppa:deadsnakes/ppa -y && \
+    apt-get update && apt-get install -y --no-install-recommends \
+        python3.10 python3.10-dev python3.10-venv \
+        build-essential git wget curl ca-certificates libgl1 libglib2.0-0 && \
     rm -rf /var/lib/apt/lists/*
+
+# Make python3.10 the default and install pip
+RUN ln -sf /usr/bin/python3.10 /usr/local/bin/python && \
+    ln -sf /usr/bin/python3.10 /usr/local/bin/python3 && \
+    wget -qO /tmp/get-pip.py https://bootstrap.pypa.io/get-pip.py && \
+    python3.10 /tmp/get-pip.py && \
+    rm /tmp/get-pip.py
 
 WORKDIR /app
 
@@ -33,8 +42,8 @@ RUN pip install torch torchvision --index-url https://download.pytorch.org/whl/c
 RUN pip install git+https://github.com/warmshao/WiLoR-mini.git
 RUN pip install fastapi uvicorn pillow dill
 
-# Pre-download/verify wilor_mini models at build time
-RUN python3 -c "from wilor_mini.pipelines.wilor_hand_pose3d_estimation_pipeline import WiLorHandPose3dEstimationPipeline; print('Import OK')" || true
+# Verify wilor_mini can be imported (fail build if not)
+RUN python3 -c "from wilor_mini.pipelines.wilor_hand_pose3d_estimation_pipeline import WiLorHandPose3dEstimationPipeline; print('WiLoR-mini import OK')"
 
 # ── Copy API server ──────────────────────────��──────────────────────────────
 COPY server_mini.py /app/server_mini.py
