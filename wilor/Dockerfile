@@ -6,8 +6,8 @@
 # Auto-enables FP16 on CUDA for ~2x inference speedup.
 #
 # Build via GitHub Actions (ai-gateway-dockers workflow), never locally.
-# Deploy via: bunx ai-gateway gpu deploy --image marcosremar/wilor-api:latest
-# ────���─────────────────────────────────────────────────────────��──────────────
+# Deploy via: bunx ai-gateway gpu deploy
+# ─────────────────────────────────────────────────────────────────────────────
 
 ARG BASE_IMAGE=nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
 FROM ${BASE_IMAGE}
@@ -15,7 +15,7 @@ FROM ${BASE_IMAGE}
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    PORT=8000
+    PORT=8080
 
 # ── System deps ──────────────────────────────────────────────────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -43,7 +43,6 @@ RUN pip install --no-build-isolation 'git+https://github.com/warmshao/WiLoR-mini
 RUN pip install fastapi uvicorn pillow dill
 
 # Pre-download models at build time so startup is instant (no HuggingFace download)
-# This creates the pipeline once, which triggers all model downloads + caching
 RUN python3 -c "\
 from wilor_mini.pipelines.wilor_hand_pose3d_estimation_pipeline import WiLorHandPose3dEstimationPipeline; \
 import torch; \
@@ -52,13 +51,17 @@ p = WiLorHandPose3dEstimationPipeline(device=device, dtype=torch.float32); \
 print('WiLoR-mini models pre-downloaded OK'); \
 "
 
-# ── Copy API server ──────────────────────────��──────────────────────────────
+# ── Copy API server + startup script ─────────────────────────────────────────
 COPY server_mini.py /app/server_mini.py
 
-EXPOSE 8000
+# Vast.ai uses /app/start.sh instead of Docker CMD. Create it so the server
+# starts automatically on any platform (Vast.ai, RunPod, plain Docker).
+RUN printf '#!/bin/bash\nexec python3 /app/server_mini.py\n' > /app/start.sh && \
+    chmod +x /app/start.sh
 
-# Health check for ai-gateway readiness probe
-HEALTHCHECK --interval=10s --timeout=5s --start-period=60s \
-    CMD curl -sf http://localhost:8000/health || exit 1
+EXPOSE 8080
+
+HEALTHCHECK --interval=10s --timeout=5s --start-period=120s \
+    CMD curl -sf http://localhost:8080/health || exit 1
 
 CMD ["python3", "/app/server_mini.py"]
