@@ -15,7 +15,7 @@ FROM ${BASE_IMAGE}
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    PORT=8080
+    PORT=8000
 
 # ── System deps ──────────────────────────────────────────────────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -59,9 +59,9 @@ COPY server_mini.py /app/server_mini.py
 RUN printf '#!/bin/bash\nexec python3 /app/server_mini.py\n' > /app/start.sh && \
     chmod +x /app/start.sh
 
-EXPOSE 8080
+EXPOSE 8000
 
 HEALTHCHECK --interval=10s --timeout=5s --start-period=120s \
-    CMD curl -sf http://localhost:8080/health || exit 1
+    CMD curl -sf http://localhost:8000/health || exit 1
 
 CMD ["python3", "/app/server_mini.py"]
