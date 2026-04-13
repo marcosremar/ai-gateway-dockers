@@ -1,25 +1,13 @@
-# ── WiLoR — End-to-end 3D Hand Localization & Reconstruction ─────────────────
-# Runs WiLoR (rolpotamias/WiLoR, CVPR 2025) in a CUDA 12.4 container with
-# Python 3.10 and PyTorch 2.4. Tested target: NVIDIA RTX 4090 (sm_89).
+# ── WiLoR-mini API — MANO hand pose rotations as a service ───────────────────
+# FastAPI + WebSocket server returning 15 MANO axis-angle rotations per hand,
+# plus global_orient (wrist rotation) and betas (hand shape).
 #
-# Source: https://github.com/rolpotamias/WiLoR
-# Paper:  https://arxiv.org/abs/2409.12259
+# Uses wilor_mini pip package (lightweight fork of WiLoR CVPR 2025).
+# Auto-enables FP16 on CUDA for ~2x inference speedup.
 #
-# What's pre-baked at build time:
-#   - WiLoR repo (cloned with --recursive for submodules)
-#   - Python deps from requirements.txt
-#   - detector.pt and wilor_final.ckpt from the official HF Spaces mirror
-#
-# What you must mount at runtime (NOT in image — license/registration required):
-#   - MANO_RIGHT.pkl  →  /app/mano_data/MANO_RIGHT.pkl
-#     Get it from https://mano.is.tue.mpg.de/ (free registration)
-#
-# Build:
-#   docker compose build
-# Run:
-#   docker compose up -d
-#   open http://localhost:7860
-# ─────────────────────────────────────────────────────────────────────────────
+# Build via GitHub Actions (ai-gateway-dockers workflow), never locally.
+# Deploy via: bunx ai-gateway gpu deploy --image marcosremar/wilor-api:latest
+# ────���─────────────────────────────────────────────────────────��──────────────
 
 ARG BASE_IMAGE=nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
 FROM ${BASE_IMAGE}
@@ -27,89 +15,34 @@ FROM ${BASE_IMAGE}
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    GRADIO_SERVER_NAME=0.0.0.0 \
-    GRADIO_SERVER_PORT=7860
+    PORT=8000
 
 # ── System deps ──────────────────────────────────────────────────────────────
-# python3.10: WiLoR pins this version
-# build-essential + python3-dev: chumpy and pyrender need C extensions
-# libgl1, libglib2.0-0: opencv-python runtime
-# libosmesa6, libegl1: pyrender headless rendering
-# git + git-lfs: clone WiLoR + handle large checkpoints
-# wget: download pretrained weights
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        software-properties-common && \
-    add-apt-repository ppa:deadsnakes/ppa -y && \
-    apt-get update && apt-get install -y --no-install-recommends \
-        python3.10 python3.10-venv python3.10-dev python3-pip \
-        build-essential git git-lfs wget ca-certificates \
-        libgl1 libglib2.0-0 libosmesa6 libegl1 libgles2 \
-        libxrender1 libsm6 libxext6 ffmpeg && \
-    rm -rf /var/lib/apt/lists/* && \
-    git lfs install
-
-# Make python3.10 the default `python` and `pip`.
-# Cannot use `ensurepip` — Debian/Ubuntu disables it for system Python.
-# Use the official get-pip.py bootstrap instead, which works on every Python.
-RUN ln -sf /usr/bin/python3.10 /usr/local/bin/python && \
-    ln -sf /usr/bin/python3.10 /usr/local/bin/python3 && \
-    wget -qO /tmp/get-pip.py https://bootstrap.pypa.io/get-pip.py && \
-    python3.10 /tmp/get-pip.py && \
-    rm /tmp/get-pip.py && \
-    python -m pip install --upgrade pip setuptools wheel
+        python3.10 python3.10-dev python3-pip python3.10-venv \
+        build-essential git wget libgl1 libglib2.0-0 && \
+    update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.10 1 && \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# ── Clone WiLoR (with submodules) ────────────────────────────────────────────
-RUN git clone --recursive https://github.com/rolpotamias/WiLoR.git /app/WiLoR
+# ── Python deps ──────────────────────────────────────────────────────────────
+RUN pip install "numpy<2.0" "setuptools<70" wheel
+RUN pip install --no-build-isolation 'git+https://github.com/mattloper/chumpy.git'
+RUN pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+RUN pip install git+https://github.com/warmshao/WiLoR-mini.git
+RUN pip install fastapi uvicorn pillow dill
 
-WORKDIR /app/WiLoR
+# Pre-download/verify wilor_mini models at build time
+RUN python3 -c "from wilor_mini.pipelines.wilor_hand_pose3d_estimation_pipeline import WiLorHandPose3dEstimationPipeline; print('Import OK')" || true
 
-# ── PyTorch with CUDA 12.4 (RTX 4090 native) ────────────────────────────────
-# WiLoR docs say cu117 + torch 2.0 but that's too old for RTX 4090 — use cu124.
-# torch 2.4.x is the stable line that works with both cu124 and the WiLoR
-# pytorch-lightning version range.
-RUN pip install \
-        torch==2.4.1+cu124 \
-        torchvision==0.19.1+cu124 \
-        --index-url https://download.pytorch.org/whl/cu124
+# ── Copy API server ──────────────────────────��──────────────────────────────
+COPY server_mini.py /app/server_mini.py
 
-# ── WiLoR Python deps ────────────────────────────────────────────────────────
-# chumpy is unmaintained — its setup.py imports pip at build time, but pip's
-# PEP 517 isolated build env doesn't expose pip. We must:
-#   1. Pre-install numpy<2 (chumpy uses np.bool which numpy 2 removed)
-#   2. Pre-install setuptools<70 + wheel + ninja explicitly so the
-#      non-isolated builds have everything they need
-#   3. Install chumpy with --no-build-isolation so its setup.py finds pip
-#   4. THEN install requirements.txt — chumpy will be skipped (already satisfied)
-RUN pip install "numpy<2.0" "Cython>=0.29" "setuptools<70" wheel ninja
-RUN pip install --no-build-isolation \
-        'git+https://github.com/mattloper/chumpy.git'
-RUN pip install --no-build-isolation -r requirements.txt
+EXPOSE 8000
 
-# ── Pre-bake pretrained weights from the official HF Spaces mirror ───────────
-# detector.pt        ≈ 11 MB  (YOLOv8 hand detector)
-# wilor_final.ckpt   ≈ 700 MB (ViT + MANO regression head)
-# model_config.yaml  ≈ 4 KB   (model architecture config)
-RUN mkdir -p /app/WiLoR/pretrained_models && \
-    wget -q https://huggingface.co/spaces/rolpotamias/WiLoR/resolve/main/pretrained_models/detector.pt \
-        -O /app/WiLoR/pretrained_models/detector.pt && \
-    wget -q https://huggingface.co/spaces/rolpotamias/WiLoR/resolve/main/pretrained_models/wilor_final.ckpt \
-        -O /app/WiLoR/pretrained_models/wilor_final.ckpt && \
-    wget -q https://huggingface.co/spaces/rolpotamias/WiLoR/resolve/main/pretrained_models/model_config.yaml \
-        -O /app/WiLoR/pretrained_models/model_config.yaml
+# Health check for ai-gateway readiness probe
+HEALTHCHECK --interval=10s --timeout=5s --start-period=60s \
+    CMD curl -sf http://localhost:8000/health || exit 1
 
-# Sanity check — fail the build if any weight is missing or empty
-RUN test -s /app/WiLoR/pretrained_models/detector.pt && \
-    test -s /app/WiLoR/pretrained_models/wilor_final.ckpt && \
-    test -s /app/WiLoR/pretrained_models/model_config.yaml
-
-# ── MANO_RIGHT.pkl placeholder ───────────────────────────────────────────────
-# Cannot ship inside the image (license restriction). Mount via volume instead.
-RUN mkdir -p /app/WiLoR/mano_data
-
-EXPOSE 7860
-
-# Default to the gradio web UI on :7860. Override CMD to run the CLI demo:
-#   docker run ... python demo.py --img_folder demo_img --out_folder out --fast --save_mesh
-CMD ["python", "gradio_demo.py"]
+CMD ["python3", "/app/server_mini.py"]
