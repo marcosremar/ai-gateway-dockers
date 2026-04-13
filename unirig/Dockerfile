@@ -60,8 +60,8 @@ RUN python -c "import torch; v=torch.__version__; assert '2.5.1' in v, f'torch w
 RUN python -c "from torch_cluster import fps; print('torch_cluster OK')"
 RUN python -c "import flash_attn; print(f'flash_attn {flash_attn.__version__} OK')"
 
-# Pre-download UniRig model weights (~2GB)
-RUN python -c "from huggingface_hub import snapshot_download; snapshot_download('VAST-AI/UniRig', local_dir='/app/unirig/checkpoints')"
+# NOTE: checkpoints are NOT baked in — server.py downloads them on first startup
+# This keeps the image ~8GB instead of ~15GB, fixing Vast.ai pull timeouts
 
 # Copy server + start script
 COPY server.py /app/server.py
