@@ -43,14 +43,10 @@ RUN pip install --no-cache-dir \
     trimesh open3d huggingface_hub \
     fastapi uvicorn python-multipart httpx
 
-# flash_attn — precompiled wheel (no CUDA compilation needed at build time)
-# Try the prebuild wheels repo first, then PyPI, then skip (some UniRig features won't work)
-RUN pip install --no-cache-dir --no-build-isolation \
-    "flash_attn>=2.5" \
-    || echo "WARN: flash_attn from PyPI failed, trying prebuild wheels..." \
-    && pip install --no-cache-dir \
-    "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v2.7.4/flash_attn-2.7.4+cu121torch2.5-cp311-cp311-linux_x86_64.whl" \
-    || echo "WARN: flash_attn install failed entirely"
+# flash_attn — official precompiled wheel (cu12 + torch2.5 + cp311)
+# Downloaded from Dao-AILab/flash-attention GitHub releases (no CUDA compilation needed)
+RUN pip install --no-cache-dir \
+    "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1%2Bcu12torch2.5cxx11abiFALSE-cp311-cp311-linux_x86_64.whl"
 
 # spconv for CUDA 12.1
 RUN pip install --no-cache-dir spconv-cu121
@@ -62,7 +58,7 @@ RUN pip install --no-cache-dir torch_scatter torch_cluster \
 # Verify torch version is still 2.5.1 (fail build if anything upgraded it)
 RUN python -c "import torch; v=torch.__version__; assert '2.5.1' in v, f'torch was upgraded to {v}!'; print(f'torch {v} OK')"
 RUN python -c "from torch_cluster import fps; print('torch_cluster OK')"
-RUN python -c "import flash_attn; print(f'flash_attn {flash_attn.__version__} OK')" || echo "WARN: flash_attn not importable"
+RUN python -c "import flash_attn; print(f'flash_attn {flash_attn.__version__} OK')"
 
 # Pre-download UniRig model weights (~2GB)
 RUN python -c "from huggingface_hub import snapshot_download; snapshot_download('VAST-AI/UniRig', local_dir='/app/unirig/checkpoints')"
