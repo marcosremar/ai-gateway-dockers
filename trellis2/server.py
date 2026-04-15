@@ -49,6 +49,12 @@ PORT = int(os.environ.get("PORT", "8000"))
 app = FastAPI(title="TRELLIS.2 3D Generation Server", version="1.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
+try:
+    from idle_watchdog import add_idle_middleware
+    add_idle_middleware(app)
+except Exception:
+    pass
+
 # ── Model (lazy-loaded on first request) ──
 pipeline = None
 model_loading = False
@@ -164,6 +170,12 @@ async def startup():
     import threading
     log.info("Starting background model load...")
     threading.Thread(target=_load_model_thread, daemon=True).start()
+    try:
+        from idle_watchdog import start_watchdog
+        import asyncio
+        asyncio.create_task(start_watchdog())
+    except Exception:
+        pass
 
 
 # ── Endpoints ──
@@ -209,26 +221,32 @@ async def health():
         status = f"unknown: {e}"
 
     try:
+        content = {
+            "status": status,
+            "model": MODEL_ID,
+            "gpu": gpu_name,
+            "gpu_memory": gpu_mem,
+            "error": model_error,
+            # Full multi-line stack trace of the most recent model load
+            # failure. Embedded directly in /health so the operator does
+            # not need to SSH in to see *which* line of the model code
+            # raised — they can just curl /health.
+            "error_traceback": model_error_traceback,
+            "config": {
+                "steps": STEPS,
+                "resolution": RESOLUTION,
+                "texture_size": TEXTURE_SIZE,
+                "decimation": DECIMATION,
+            },
+        }
+        try:
+            from idle_watchdog import get_health_metrics
+            content.update(get_health_metrics())
+        except Exception:
+            pass
         return JSONResponse(
             status_code=200,
-            content={
-                "status": status,
-                "model": MODEL_ID,
-                "gpu": gpu_name,
-                "gpu_memory": gpu_mem,
-                "error": model_error,
-                # Full multi-line stack trace of the most recent model load
-                # failure. Embedded directly in /health so the operator does
-                # not need to SSH in to see *which* line of the model code
-                # raised — they can just curl /health.
-                "error_traceback": model_error_traceback,
-                "config": {
-                    "steps": STEPS,
-                    "resolution": RESOLUTION,
-                    "texture_size": TEXTURE_SIZE,
-                    "decimation": DECIMATION,
-                },
-            },
+            content=content,
         )
     except Exception as e:
         # Absolute last-resort fallback so /health literally never 5xxes.

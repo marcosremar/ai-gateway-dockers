@@ -139,6 +139,12 @@ async def lifespan(app: FastAPI):
     _models_ready = True
     print("Application startup complete.", flush=True)
 
+    try:
+        from idle_watchdog import start_watchdog
+        asyncio.create_task(start_watchdog())
+    except Exception as e:
+        print(f"[hy-motion] Idle watchdog not started: {e}", flush=True)
+
     yield  # server runs here
 
     print("[hy-motion] Shutting down.", flush=True)
@@ -152,6 +158,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+try:
+    from idle_watchdog import add_idle_middleware
+    add_idle_middleware(app)
+except Exception as e:
+    print(f"[hy-motion] Idle middleware not installed: {e}", flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -297,9 +309,13 @@ def _run_inference(req: PredictRequest) -> dict:
 
 @app.get("/health")
 def health():
-    if not _models_ready:
-        return {"status": "loading", "device": _device_str}
-    return {"status": "ok", "device": _device_str, "model_path": MODEL_PATH}
+    resp = {"status": "loading" if not _models_ready else "ok", "device": _device_str, "model_path": MODEL_PATH}
+    try:
+        from idle_watchdog import get_health_metrics
+        resp.update(get_health_metrics())
+    except Exception:
+        pass
+    return resp
 
 
 @app.post("/predict", response_model=PredictResponse)

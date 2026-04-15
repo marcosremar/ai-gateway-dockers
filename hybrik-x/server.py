@@ -111,6 +111,13 @@ async def lifespan(app: FastAPI):
     _models_ready = True
     print("Application startup complete.", flush=True)
 
+    # Start idle watchdog (auto-stops pod after IDLE_TIMEOUT_MIN of no requests)
+    try:
+        from idle_watchdog import start_watchdog
+        asyncio.create_task(start_watchdog())
+    except Exception as e:
+        print(f"[hybrik-x] Idle watchdog not started: {e}", flush=True)
+
     yield  # server runs here
 
     print("[hybrik-x] Shutting down.", flush=True)
@@ -124,6 +131,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Idle tracking middleware (gateway reads last_request_at + active_requests from /health)
+try:
+    from idle_watchdog import add_idle_middleware
+    add_idle_middleware(app)
+except Exception as e:
+    print(f"[hybrik-x] Idle middleware not installed: {e}", flush=True)
 
 # ---------------------------------------------------------------------------
 # Schemas
@@ -220,9 +234,13 @@ def _run_inference(image_base64: str, bbox_hint: Optional[list], flip_test: bool
 
 @app.get("/health")
 def health():
-    if not _models_ready:
-        return {"status": "loading", "device": str(device)}
-    return {"status": "ok", "device": str(device)}
+    resp = {"status": "loading" if not _models_ready else "ok", "device": str(device)}
+    try:
+        from idle_watchdog import get_health_metrics
+        resp.update(get_health_metrics())
+    except Exception:
+        pass
+    return resp
 
 
 @app.post("/predict", response_model=PredictResponse)

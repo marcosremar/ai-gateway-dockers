@@ -155,6 +155,11 @@ async def lifespan(app: FastAPI):
     print("=" * 60)
     bg = threading.Thread(target=load_models_background, daemon=True)
     bg.start()
+    try:
+        from idle_watchdog import start_watchdog
+        asyncio.create_task(start_watchdog())
+    except Exception:
+        pass
     yield
     # Cleanup WebRTC
     coros = [pc.close() for pc in pcs]
@@ -164,6 +169,12 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Ultravox S2S", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+try:
+    from idle_watchdog import add_idle_middleware
+    add_idle_middleware(app)
+except Exception:
+    pass
 
 
 # ── Helpers ──
@@ -304,7 +315,7 @@ async def health():
     host = os.environ.get("VAST_HOST", "")
     port = os.environ.get("VAST_PORT", "8000")
 
-    return {
+    resp = {
         "status": "ok" if ready else "loading",
         "phase": "ready" if ready else "loading",
         "uptime_s": uptime,
@@ -325,6 +336,12 @@ async def health():
             "webrtc": {"signalingUrl": "/api/offer"} if AIORTC_AVAILABLE else None,
         },
     }
+    try:
+        from idle_watchdog import get_health_metrics
+        resp.update(get_health_metrics())
+    except Exception:
+        pass
+    return resp
 
 
 class SpeechRequest(BaseModel):

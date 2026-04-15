@@ -21,6 +21,12 @@ log = logging.getLogger("kokoro-server")
 
 app = FastAPI(title="Kokoro TTS")
 
+try:
+    from idle_watchdog import add_idle_middleware
+    add_idle_middleware(app)
+except Exception:
+    pass
+
 # Voice prefix → lang_code for KPipeline
 LANG_MAP = {
     "a": "a", "b": "b", "e": "e", "f": "f",
@@ -89,6 +95,12 @@ async def startup():
     log.info("Pre-warming English pipeline...")
     get_pipeline("a")
     log.info("Kokoro TTS ready")
+    try:
+        from idle_watchdog import start_watchdog
+        import asyncio
+        asyncio.create_task(start_watchdog())
+    except Exception:
+        pass
 
 
 class SpeechRequest(BaseModel):
@@ -101,7 +113,13 @@ class SpeechRequest(BaseModel):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "model": "kokoro-82m", "pipelines_loaded": list(_pipelines.keys())}
+    resp = {"status": "ok", "model": "kokoro-82m", "pipelines_loaded": list(_pipelines.keys())}
+    try:
+        from idle_watchdog import get_health_metrics
+        resp.update(get_health_metrics())
+    except Exception:
+        pass
+    return resp
 
 
 @app.get("/v1/audio/voices")

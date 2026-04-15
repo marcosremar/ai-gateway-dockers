@@ -172,7 +172,7 @@ except Exception as e:
 
 @app.get("/health")
 async def health():
-    return {
+    resp = {
         "status": "ok" if service_status["pipeline"] == "ready" else "loading",
         "uptime": round(time.time() - boot_time, 1),
         "device": DEVICE,
@@ -184,6 +184,12 @@ async def health():
             "upscaler": {"warm": service_status["upscaler"] == "ready"},
         },
     }
+    try:
+        from idle_watchdog import get_health_metrics
+        resp.update(get_health_metrics())
+    except Exception:
+        pass
+    return resp
 
 
 @app.get("/version")

@@ -13,7 +13,11 @@ Usage in server.py:
     asyncio.create_task(start_watchdog())
 
 Env vars:
-    IDLE_TIMEOUT_MIN  — minutes before auto-stop (default: 15, 0=disabled)
+    IDLE_TIMEOUT_MIN      — minutes before auto-stop (default: 15, 0=disabled)
+    VAST_CONTAINERLABEL   — Vast.ai instance ID (injected automatically by Vast.ai)
+    CONTAINER_API_KEY     — pre-authorized Vast.ai API key (injected automatically by Vast.ai)
+    RUNPOD_POD_ID         — RunPod pod ID (for RunPod self-stop fallback)
+    RUNPOD_API_KEY        — RunPod API key (for RunPod self-stop fallback)
 """
 
 import os
@@ -27,6 +31,7 @@ IDLE_TIMEOUT_MIN = int(os.environ.get("IDLE_TIMEOUT_MIN", "15"))
 CHECK_INTERVAL_S = 30
 
 _last_request_time = time.time()
+_active_requests = 0
 
 
 def touch_activity():
@@ -36,6 +41,18 @@ def touch_activity():
 
 def idle_seconds() -> float:
     return time.time() - _last_request_time
+
+
+def get_health_metrics() -> dict:
+    """Return idle tracking metrics for inclusion in /health response.
+
+    The gateway reads these fields to reset the idle timer, even when
+    requests bypass the gateway and hit the GPU pod directly.
+    """
+    return {
+        "last_request_at": _last_request_time,
+        "active_requests": _active_requests,
+    }
 
 
 def add_idle_middleware(app):
@@ -55,12 +72,19 @@ def add_idle_middleware(app):
 
     class IdleTrackingMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request: Request, call_next):
+            global _active_requests
             path = request.url.path
             # Only external model requests count (STT, LLM, TTS, pipeline)
-            if path not in EXCLUDED_PATHS and not path.startswith("/docs"):
+            is_model_request = path not in EXCLUDED_PATHS and not path.startswith("/docs")
+            if is_model_request:
                 touch_activity()
-                log.debug(f"[idle-watchdog] Activity: {request.method} {path}")
-            return await call_next(request)
+                _active_requests += 1
+                log.debug(f"[idle-watchdog] Activity: {request.method} {path} (active={_active_requests})")
+            try:
+                return await call_next(request)
+            finally:
+                if is_model_request:
+                    _active_requests = max(0, _active_requests - 1)
 
     app.add_middleware(IdleTrackingMiddleware)
     log.info(f"[idle-watchdog] Middleware installed — {IDLE_TIMEOUT_MIN} min timeout")
@@ -83,6 +107,27 @@ async def start_watchdog():
 
         if idle_s >= timeout_s:
             log.warning(f"[idle-watchdog] Idle {idle_s/60:.0f} min — shutting down")
+
+            # Try Vast.ai self-stop via CONTAINER_API_KEY + VAST_CONTAINERLABEL
+            # Vast.ai injects these into every container. No external key needed.
+            vast_label = os.environ.get("VAST_CONTAINERLABEL", "")
+            container_api_key = os.environ.get("CONTAINER_API_KEY", "")
+            if vast_label and container_api_key:
+                try:
+                    import httpx
+                    async with httpx.AsyncClient() as client:
+                        r = await client.put(
+                            f"https://console.vast.ai/api/v0/instances/{vast_label}/",
+                            headers={"Authorization": f"Bearer {container_api_key}",
+                                     "Content-Type": "application/json"},
+                            json={"state": "stopped"},
+                            timeout=10,
+                        )
+                        log.info(f"[idle-watchdog] Vast.ai self-stop: HTTP {r.status_code}")
+                        return
+                except Exception as e:
+                    log.error(f"[idle-watchdog] Vast.ai self-stop failed: {e}")
+
             # Try RunPod stop API if available
             pod_id = os.environ.get("RUNPOD_POD_ID", "")
             api_key = os.environ.get("RUNPOD_API_KEY", "")

@@ -68,6 +68,12 @@ JOINT_NAMES = [
 app = FastAPI(title="WiLoR-mini Hand Pose API", version="2.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
+try:
+    from idle_watchdog import add_idle_middleware
+    add_idle_middleware(app)
+except Exception:
+    pass
+
 
 @app.on_event("startup")
 async def startup():
@@ -85,6 +91,12 @@ async def startup():
     from wilor_mini.pipelines.wilor_hand_pose3d_estimation_pipeline import WiLorHandPose3dEstimationPipeline
     _pipeline = WiLorHandPose3dEstimationPipeline(device=_device, dtype=_dtype)
     print("[WiLoR-mini] Ready.")
+    try:
+        from idle_watchdog import start_watchdog
+        import asyncio
+        asyncio.create_task(start_watchdog())
+    except Exception:
+        pass
 
 
 class PredictRequest(BaseModel):
@@ -94,7 +106,13 @@ class PredictRequest(BaseModel):
 @app.get("/health")
 async def health():
     dtype = str(getattr(_pipeline, 'dtype', 'float32')) if _pipeline else 'unknown'
-    return {"status": "ok" if _pipeline else "loading", "device": str(_device), "dtype": dtype}
+    resp = {"status": "ok" if _pipeline else "loading", "device": str(_device), "dtype": dtype}
+    try:
+        from idle_watchdog import get_health_metrics
+        resp.update(get_health_metrics())
+    except Exception:
+        pass
+    return resp
 
 
 @app.post("/predict")
