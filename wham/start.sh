@@ -1,16 +1,20 @@
 #!/bin/bash
-set -e
-CKPT="/app/WHAM/checkpoints/wham_vit_w_3dpw.pth.tar"
+# Start server immediately, download checkpoints in background.
+# Server returns status:"loading" until model is loaded.
 
-if [ ! -f "$CKPT" ]; then
+download_checkpoints() {
+  CKPT="/app/WHAM/checkpoints/wham_vit_w_3dpw.pth.tar"
+  [ -f "$CKPT" ] && return 0
   echo "[wham] Downloading checkpoint..."
   mkdir -p /app/WHAM/checkpoints
-  python3 -c "
-import gdown
-gdown.download('1Erjkho7O0bnZFawarntICRUCroaKabRE', '/app/WHAM/checkpoints/wham_vit_w_3dpw.pth.tar', quiet=False)
-print('[wham] Checkpoint ready')
-" 2>&1 || echo "[wham] WARNING: checkpoint download failed"
-fi
+  python3 -c "import gdown; gdown.download('1Erjkho7O0bnZFawarntICRUCroaKabRE', '/app/WHAM/checkpoints/wham_vit_w_3dpw.pth.tar', quiet=False)" || echo "[wham] Download failed"
+}
 
-echo "[wham] Starting server..."
-exec python3 /app/server.py
+echo "[startup] Starting server..."
+python3 /app/server.py &
+SERVER_PID=$!
+
+echo "[startup] Downloading checkpoints in background..."
+download_checkpoints &
+
+wait $SERVER_PID
