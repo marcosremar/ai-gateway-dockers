@@ -42,13 +42,9 @@ RUN git clone --depth 1 https://github.com/MotrixLab/SMPLest-X.git /app/SMPLest-
 WORKDIR /app/SMPLest-X
 RUN pip install smplx scipy ultralytics
 
-# ── Download checkpoint from HuggingFace (8.2GB) ────────────────────────────
+# ── Checkpoint deps (downloaded at startup via start.sh) ─────────────────────
 RUN pip install huggingface_hub && \
-    python3 -c "\
-from huggingface_hub import hf_hub_download; \
-hf_hub_download('waanqii/SMPLest-X', 'smplest_x_h32.pth.tar', \
-    local_dir='/app/SMPLest-X/pretrained_models/smplest_x_h'); \
-print('[smplest-x] Checkpoint downloaded')"
+    mkdir -p /app/SMPLest-X/pretrained_models/smplest_x_h
 
 # ── SMPL-X body model placeholder (mount or bake) ───────────────────────────
 RUN mkdir -p /app/SMPLest-X/human_models/human_model_files/smplx /app/SMPLest-X/human_models/human_model_files/smpl
@@ -59,13 +55,15 @@ RUN pip install fastapi "uvicorn[standard]" python-multipart Pillow opencv-pytho
 WORKDIR /app
 COPY server.py /app/server.py
 COPY idle_watchdog.py /app/idle_watchdog.py
+COPY start.sh /app/start.sh
+RUN chmod +x /app/start.sh
 
-ENV SMPLESTX_CONFIG=/app/SMPLest-X/main/config/config_smpler_x_h32.py \
-    SMPLESTX_CHECKPOINT=/app/SMPLest-X/pretrained_models/smplest_x_h/smplest_x_h32.pth.tar
+ENV SMPLESTX_CONFIG=/app/SMPLest-X/main/config/config_smpler_x_h.py \
+    SMPLESTX_CHECKPOINT=/app/SMPLest-X/pretrained_models/smplest_x_h/smplest_x_h.pth.tar
 
 EXPOSE 8000
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=300s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=600s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
-CMD ["python3", "/app/server.py"]
+CMD ["/app/start.sh"]

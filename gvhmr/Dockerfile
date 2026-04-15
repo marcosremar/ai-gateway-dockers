@@ -40,13 +40,11 @@ RUN pip install -e . 2>/dev/null || true
 # ── Additional deps ──────────────────────────────────────────────────────────
 RUN pip install smplx scipy einops timm ultralytics
 
-# ── Download checkpoints via gdown ───────────────────────────────────────────
+# ── Checkpoint deps (download at startup via start.sh — Google Drive needs runtime auth) ──
 RUN pip install gdown && \
     mkdir -p inputs/checkpoints/gvhmr inputs/checkpoints/hmr2 \
              inputs/checkpoints/vitpose inputs/checkpoints/yolo \
-             inputs/checkpoints/dpvo inputs/checkpoints/body_models && \
-    gdown --folder "1eebJ13FUEXrKBawHpJroW0sNSxLjh9xD" -O inputs/checkpoints/ 2>/dev/null || \
-    echo "[gvhmr] WARNING: gdown folder failed — checkpoints must be mounted at runtime"
+             inputs/checkpoints/dpvo inputs/checkpoints/body_models
 
 # ── SMPL body model placeholder ─────────────────────────────────────────────
 RUN mkdir -p inputs/checkpoints/body_models/smplx inputs/checkpoints/body_models/smpl
@@ -57,12 +55,14 @@ RUN pip install fastapi "uvicorn[standard]" python-multipart Pillow opencv-pytho
 WORKDIR /app
 COPY server.py /app/server.py
 COPY idle_watchdog.py /app/idle_watchdog.py
+COPY start.sh /app/start.sh
+RUN chmod +x /app/start.sh
 
 ENV GVHMR_CHECKPOINT=/app/GVHMR/inputs/checkpoints/gvhmr/gvhmr_siga24_release.ckpt
 
 EXPOSE 8000
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=300s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=600s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
-CMD ["python3", "/app/server.py"]
+CMD ["/app/start.sh"]

@@ -56,12 +56,14 @@ RUN pip install fastapi "uvicorn[standard]" python-multipart Pillow opencv-pytho
 WORKDIR /app
 COPY server.py /app/server.py
 COPY idle_watchdog.py /app/idle_watchdog.py
+COPY start.sh /app/start.sh
+RUN chmod +x /app/start.sh
 
 ENV TOKENHMR_CHECKPOINT=/app/checkpoints/tokenhmr_model_latest.ckpt
 
 EXPOSE 8000
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=300s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=600s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
-CMD ["python3", "/app/server.py"]
+CMD ["/app/start.sh"]

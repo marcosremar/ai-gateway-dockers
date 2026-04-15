@@ -39,11 +39,8 @@ RUN pip install -e . 2>/dev/null || pip install -r requirements.txt 2>/dev/null 
 # ── Additional deps ──────────────────────────────────────────────────────────
 RUN pip install smplx scipy joblib plyfile yacs einops
 
-# ── Download checkpoint via gdown ────────────────────────────────────────────
-RUN pip install gdown && \
-    mkdir -p /app/WHAM/checkpoints && \
-    gdown "1Erjkho7O0bnZFawarntICRUCroaKabRE" -O /app/WHAM/checkpoints/wham_vit_w_3dpw.pth.tar && \
-    echo "[wham] Checkpoint downloaded"
+# ── Checkpoint deps (downloaded at startup via start.sh) ─────────────────────
+RUN pip install gdown && mkdir -p /app/WHAM/checkpoints
 
 # ── SMPL body model placeholder ─────────────────────────────────────────────
 RUN mkdir -p /app/body_models/smpl
@@ -54,13 +51,15 @@ RUN pip install fastapi "uvicorn[standard]" python-multipart Pillow opencv-pytho
 WORKDIR /app
 COPY server.py /app/server.py
 COPY idle_watchdog.py /app/idle_watchdog.py
+COPY start.sh /app/start.sh
+RUN chmod +x /app/start.sh
 
 ENV WHAM_CONFIG=/app/WHAM/configs/yamls/demo.yaml \
     WHAM_CHECKPOINT=/app/WHAM/checkpoints/wham_vit_w_3dpw.pth.tar
 
 EXPOSE 8000
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=300s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=600s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
-CMD ["python3", "/app/server.py"]
+CMD ["/app/start.sh"]
