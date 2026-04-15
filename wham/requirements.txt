@@ -1,0 +1,15 @@
+# WHAM — World-grounded Humans with Accurate Motion
+# https://github.com/yohanshin/WHAM
+torch>=2.1.0
+torchvision>=0.16.0
+numpy<2.0
+opencv-python-headless
+Pillow
+scipy
+smplx
+yolov8
+fastapi
+uvicorn[standard]
+python-multipart
+plyfile
+joblib

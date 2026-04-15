@@ -1,0 +1,15 @@
+# SMPLest-X — Expressive Whole-Body Human Pose & Shape Estimation
+# https://github.com/SMPLCap/SMPLest-X
+torch>=2.1.0
+torchvision>=0.16.0
+mmcv>=2.0.0
+mmpose>=1.0.0
+mmdet>=3.0.0
+numpy<2.0
+opencv-python-headless
+Pillow
+scipy
+smplx
+fastapi
+uvicorn[standard]
+python-multipart

@@ -1,0 +1,15 @@
+# TRAM — Tracking and Reconstruction of Arbitrary 3D humans in the wild
+# https://github.com/yufu-wang/tram
+torch>=2.1.0
+torchvision>=0.16.0
+numpy<2.0
+opencv-python-headless
+Pillow
+scipy
+smplx
+fastapi
+uvicorn[standard]
+python-multipart
+einops
+timm
+detectron2
