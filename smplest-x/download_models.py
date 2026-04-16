@@ -14,6 +14,15 @@ for f in ["SMPLX_NEUTRAL.npz", "SMPLX_MALE.npz", "SMPLX_FEMALE.npz"]:
     size_mb = os.path.getsize(f"human_models/human_model_files/smplx/{f}") / 1e6
     print(f"  OK: smplx/{f} ({size_mb:.1f} MB)")
 
+# ── SMPL-X joint mapping + vertex IDs (from camenduru/SMPLer-X) ────────────
+# These are required by the SMPLX singleton for joint mapping and face vertices.
+for f in ["SMPLX_to_J14.pkl", "MANO_SMPLX_vertex_ids.pkl",
+          "SMPL-X__FLAME_vertex_ids.npy", "SMPLX_NEUTRAL.pkl"]:
+    path = hf_hub_download("camenduru/SMPLer-X", f)
+    shutil.copy(path, f"human_models/human_model_files/smplx/{f}")
+    size_mb = os.path.getsize(f"human_models/human_model_files/smplx/{f}") / 1e6
+    print(f"  OK: smplx/{f} ({size_mb:.1f} MB)")
+
 # ── SMPL body models (.pkl) ─────────────────────────────────────────────────
 os.makedirs("human_models/human_model_files/smpl", exist_ok=True)
 for f in ["SMPL_NEUTRAL.pkl", "SMPL_MALE.pkl", "SMPL_FEMALE.pkl"]:

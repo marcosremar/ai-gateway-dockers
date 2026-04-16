@@ -102,7 +102,17 @@ def _load_model_sync():
         log.info(f"Human models: {_cfg.model.human_model_path} "
                  f"(exists={os.path.isdir(_cfg.model.human_model_path)})")
 
-        # ── Step 2: Build model (loads 8.2GB checkpoint) ─────────────────
+        # ── Step 2a: Initialize SMPLX singleton ────────────────────────
+        # MUST happen before _make_model() because get_model() →
+        # TransformerDecoderHead → SMPLX() expects the singleton to exist.
+        _load_progress = "initializing SMPLX body model"
+        log.info("Initializing SMPLX singleton...")
+
+        from human_models.human_models import SMPLX as SMPLXSingleton
+        SMPLXSingleton(_cfg.model.human_model_path)
+        log.info("SMPLX singleton initialized")
+
+        # ── Step 2b: Build model (loads 8.2GB checkpoint) ────────────────
         _load_progress = "building model (loading checkpoint)"
         log.info("Building model via Tester._make_model()...")
 
