@@ -40,11 +40,27 @@ detector = None
 device = None
 
 
+def download_checkpoint():
+    ckpt = os.environ.get("WHAM_CHECKPOINT", "/app/WHAM/checkpoints/wham_vit_w_3dpw.pth.tar")
+    if os.path.exists(ckpt):
+        return ckpt
+    log.info("Downloading WHAM checkpoint...")
+    os.makedirs(os.path.dirname(ckpt), exist_ok=True)
+    try:
+        import gdown
+        gdown.download("1Erjkho7O0bnZFawarntICRUCroaKabRE", ckpt, quiet=False)
+        log.info("Checkpoint downloaded")
+    except Exception as e:
+        log.error(f"Download failed: {e}")
+    return ckpt
+
+
 def load_model():
     global model, detector, device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     log.info(f"Loading WHAM on {device}...")
 
+    download_checkpoint()
     sys.path.insert(0, "/app/WHAM")
 
     try:

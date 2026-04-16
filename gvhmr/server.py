@@ -36,11 +36,30 @@ model = None
 device = None
 
 
+def download_checkpoint():
+    ckpt_dir = "/app/GVHMR/inputs/checkpoints"
+    marker = os.path.join(ckpt_dir, ".done")
+    if os.path.exists(marker):
+        return
+    log.info("Downloading GVHMR checkpoints from Google Drive...")
+    try:
+        import gdown
+        gdown.download_folder(
+            "https://drive.google.com/drive/folders/1eebJ13FUEXrKBawHpJroW0sNSxLjh9xD",
+            output=ckpt_dir, quiet=False, use_cookies=False
+        )
+        open(marker, "w").write("ok")
+        log.info("Checkpoints downloaded")
+    except Exception as e:
+        log.error(f"Download failed: {e}")
+
+
 def load_model():
     global model, device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     log.info(f"Loading GVHMR on {device}...")
 
+    download_checkpoint()
     sys.path.insert(0, "/app/GVHMR")
 
     try:

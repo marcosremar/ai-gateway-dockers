@@ -36,16 +36,44 @@ model = None
 device = None
 
 
+def download_checkpoint():
+    """Download checkpoint if not present."""
+    checkpoint = os.environ.get("TOKENHMR_CHECKPOINT", "/app/checkpoints/tokenhmr_model_latest.ckpt")
+    if os.path.exists(checkpoint):
+        log.info(f"Checkpoint exists: {checkpoint}")
+        return checkpoint
+    log.info("Downloading TokenHMR checkpoint...")
+    os.makedirs(os.path.dirname(checkpoint), exist_ok=True)
+    try:
+        import subprocess
+        r = subprocess.run([
+            "wget", "-q",
+            "https://download.is.tue.mpg.de/download.php?domain=tokenhmr&sfile=tokenhmr_model_latest.zip",
+            "-O", "/tmp/tokenhmr.zip"
+        ], timeout=300)
+        if r.returncode == 0 and os.path.exists("/tmp/tokenhmr.zip") and os.path.getsize("/tmp/tokenhmr.zip") > 10000:
+            subprocess.run(["unzip", "-o", "/tmp/tokenhmr.zip", "-d", "/app/checkpoints/"], timeout=60)
+            os.remove("/tmp/tokenhmr.zip")
+            log.info("Checkpoint downloaded and extracted")
+        else:
+            log.error("Checkpoint download failed or too small (may need registration)")
+    except Exception as e:
+        log.error(f"Checkpoint download error: {e}")
+    return checkpoint
+
+
 def load_model():
     global model, device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     log.info(f"Loading TokenHMR on {device}...")
 
+    # Download checkpoint if needed
+    checkpoint = download_checkpoint()
+
     sys.path.insert(0, "/app/TokenHMR")
 
     try:
         from tokenhmr.models import load_tokenhmr
-        checkpoint = os.environ.get("TOKENHMR_CHECKPOINT", "/app/checkpoints/tokenhmr.pth")
         model = load_tokenhmr(checkpoint, device=device)
         model.eval()
         log.info("TokenHMR model loaded")

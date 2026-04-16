@@ -37,11 +37,30 @@ model = None
 device = None
 
 
+def download_checkpoint():
+    ckpt = os.environ.get("SMPLESTX_CHECKPOINT",
+        "/app/SMPLest-X/pretrained_models/smplest_x_h/smplest_x_h.pth.tar")
+    if os.path.exists(ckpt):
+        return ckpt
+    log.info("Downloading SMPLest-X checkpoint (8.2GB)...")
+    os.makedirs(os.path.dirname(ckpt), exist_ok=True)
+    try:
+        from huggingface_hub import hf_hub_download
+        hf_hub_download("waanqii/SMPLest-X", "smplest_x_h.pth.tar",
+            local_dir=os.path.dirname(ckpt))
+        log.info("Checkpoint downloaded")
+    except Exception as e:
+        log.error(f"Download failed: {e}")
+    return ckpt
+
+
 def load_model():
     """Load SMPLest-X model with mmpose backend."""
     global model, device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     log.info(f"Loading SMPLest-X on {device}...")
+
+    download_checkpoint()
 
     # SMPLest-X uses mmpose's top-down approach
     # Config and checkpoint paths (baked into Docker image)
