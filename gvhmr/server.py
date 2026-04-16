@@ -178,6 +178,49 @@ async def predict(req: PredictRequest):
     }
 
 
+
+
+@app.get("/debug")
+async def debug():
+    """Diagnostic endpoint — shows checkpoint status, import errors, model state."""
+    import traceback
+    info = {"device": str(device), "model_loaded": model is not None}
+    
+    # Check checkpoint
+    import glob
+    ckpt_dirs = ["/app/checkpoints", "/app/WHAM/checkpoints", "/app/GVHMR/inputs/checkpoints",
+                 "/app/SMPLest-X/pretrained_models", "/app/TokenHMR/data", "/app/TRAM/data"]
+    for d in ckpt_dirs:
+        files = glob.glob(f"{d}/**/*", recursive=True)
+        if files:
+            info[f"files_in_{d}"] = [f"{f} ({os.path.getsize(f)//1024}KB)" for f in files[:20] if os.path.isfile(f)]
+    
+    # Try imports
+    test_imports = ["scipy", "scipy.spatial.transform", "smplx", "cv2", "torch"]
+    for mod in test_imports:
+        try:
+            __import__(mod)
+            info[f"import_{mod}"] = "ok"
+        except Exception as e:
+            info[f"import_{mod}"] = str(e)[:100]
+    
+    # Try model-specific import
+    try:
+        import numpy
+        info["numpy_version"] = numpy.__version__
+    except: pass
+    
+    # Capture load_model error
+    if model is None:
+        try:
+            load_model()
+            info["reload_result"] = "model loaded!" if model is not None else "still None"
+        except Exception as e:
+            info["reload_error"] = traceback.format_exc()[-500:]
+    
+    return info
+
+
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
