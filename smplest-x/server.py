@@ -49,6 +49,7 @@ except Exception as e:
 # ─── Global model state ─────────────────────────────────────────────────────
 model = None
 device = None
+_load_error = None  # Captures traceback from load_model failures
 
 
 def download_checkpoint():
@@ -90,22 +91,26 @@ def load_model():
     log.info(f"Config: {config_path} (exists={os.path.exists(config_path)})")
     log.info(f"Checkpoint: {checkpoint_path} (exists={os.path.exists(checkpoint_path)})")
 
+    global _load_error
     try:
         from mmpose.apis import init_model as init_pose_model
         log.info("mmpose imported OK — loading model...")
         model = init_pose_model(config_path, checkpoint_path, device=str(device))
         model.eval()
+        _load_error = None
         log.info("SMPLest-X model loaded successfully")
     except Exception as e:
-        import traceback
+        _load_error = traceback.format_exc()
         log.error(f"Failed to load model: {e}")
-        log.error(traceback.format_exc())
+        log.error(_load_error)
         try:
             sys.path.insert(0, "/app/SMPLest-X")
             from utils.inference_utils import load_model as load_smplestx
             model = load_smplestx(config_path, checkpoint_path, device)
+            _load_error = None
             log.info("SMPLest-X loaded via alternative path")
         except Exception as e2:
+            _load_error = traceback.format_exc()
             log.error(f"Alternative load also failed: {e2}")
 
 
@@ -184,6 +189,8 @@ async def health():
     }
     if _import_error:
         resp["import_error"] = _import_error[-500:]
+    if _load_error:
+        resp["load_error"] = _load_error[-500:]
     return resp
 
 
