@@ -42,62 +42,15 @@ WORKDIR /app/SMPLest-X
 RUN pip install -r requirements.txt 2>/dev/null || true
 RUN pip install smplx scipy ultralytics pyopengl==3.1.4 huggingface_hub
 
-# ── Download SMPL-X/SMPL/MANO body models from HuggingFace ─────────────────
-# These are REQUIRED for model initialization. Without them, load_model fails.
-# Source: lithiumice/models_hub (mirrors of official SMPL-X body models)
-RUN python3 -c "
-from huggingface_hub import hf_hub_download
-import shutil, os
-
-# SMPL-X body models (.npz)
-os.makedirs('human_models/human_model_files/smplx', exist_ok=True)
-for f in ['SMPLX_NEUTRAL.npz', 'SMPLX_MALE.npz', 'SMPLX_FEMALE.npz']:
-    path = hf_hub_download('lithiumice/models_hub', f'4_SMPLhub/SMPLX/X_npz/{f}')
-    shutil.copy(path, f'human_models/human_model_files/smplx/{f}')
-    print(f'  OK: smplx/{f}')
-
-# SMPL body models (.pkl)
-os.makedirs('human_models/human_model_files/smpl', exist_ok=True)
-for f in ['SMPL_NEUTRAL.pkl', 'SMPL_MALE.pkl', 'SMPL_FEMALE.pkl']:
-    path = hf_hub_download('lithiumice/models_hub', f'4_SMPLhub/SMPL/X_pkl/{f}')
-    shutil.copy(path, f'human_models/human_model_files/smpl/{f}')
-    print(f'  OK: smpl/{f}')
-
-# MANO hand models (.pkl) — needed for hand joint mapping
-os.makedirs('human_models/human_model_files/mano', exist_ok=True)
-for f in ['MANO_LEFT.pkl', 'MANO_RIGHT.pkl']:
-    path = hf_hub_download('lithiumice/models_hub', f'4_SMPLhub/MANO/pkl/{f}')
-    shutil.copy(path, f'human_models/human_model_files/mano/{f}')
-    print(f'  OK: mano/{f}')
-
-print('All body models downloaded!')
-" && \
-    echo "Body model files:" && \
-    find human_models -type f -exec ls -lh {} \;
-
-# ── Download SMPLest-X checkpoint + config (8.2GB) ──────────────────────────
-# Baked into image like HybrIK does — no runtime download needed.
-RUN mkdir -p pretrained_models/smplest_x_h && \
-    python3 -c "
-from huggingface_hub import hf_hub_download
-import shutil
-for f in ['smplest_x_h.pth.tar', 'config_base.py']:
-    path = hf_hub_download('waanqii/SMPLest-X', f)
-    shutil.copy(path, f'pretrained_models/smplest_x_h/{f}')
-    print(f'  OK: {f}')
-print('Checkpoint + config ready!')
-"
-
-# ── Pre-download YOLOv8x detector ───────────────────────────────────────────
-RUN python3 -c "
-from ultralytics import YOLO
-import shutil, os
-model = YOLO('yolov8x.pt')
-os.makedirs('pretrained_models', exist_ok=True)
-if os.path.exists('yolov8x.pt'):
-    shutil.move('yolov8x.pt', 'pretrained_models/yolov8x.pt')
-print('YOLOv8x downloaded!')
-" 2>/dev/null || echo "YOLO download skipped (will auto-download at runtime)"
+# ── Download ALL models at build time (body models + checkpoint + YOLO) ─────
+# Script avoids inline `from` which Docker misparses as FROM instruction.
+COPY download_models.py /tmp/download_models.py
+RUN python3 /tmp/download_models.py && \
+    rm /tmp/download_models.py && \
+    echo "=== Body model files ===" && \
+    find human_models -type f -exec ls -lh {} \; && \
+    echo "=== Checkpoint ===" && \
+    ls -lh pretrained_models/smplest_x_h/
 
 # ── FastAPI server deps ─────────────────────────────────────────────────────
 RUN pip install fastapi "uvicorn[standard]" python-multipart Pillow opencv-python-headless httpx
