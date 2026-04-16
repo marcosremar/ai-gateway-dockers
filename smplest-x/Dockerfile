@@ -68,4 +68,6 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=600s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
-CMD ["/app/start.sh"]
+# Use python directly — Vast.ai doesn't always honor CMD/start.sh
+# Checkpoint download is handled inside server.py load_model()
+CMD ["python3", "/app/server.py"]

@@ -66,25 +66,33 @@ def load_model():
     # Config and checkpoint paths (baked into Docker image)
     config_path = os.environ.get(
         "SMPLESTX_CONFIG",
-        "/app/SMPLest-X/main/config/config_smpler_x_b32.py",
+        "/app/SMPLest-X/configs/config_smplest_x_h.py",
     )
     checkpoint_path = os.environ.get(
         "SMPLESTX_CHECKPOINT",
-        "/app/checkpoints/smplest_x_b32.pth",
+        "/app/SMPLest-X/pretrained_models/smplest_x_h/smplest_x_h.pth.tar",
     )
+
+    log.info(f"Config: {config_path} (exists={os.path.exists(config_path)})")
+    log.info(f"Checkpoint: {checkpoint_path} (exists={os.path.exists(checkpoint_path)})")
 
     try:
         from mmpose.apis import init_model as init_pose_model
+        log.info("mmpose imported OK — loading model...")
         model = init_pose_model(config_path, checkpoint_path, device=str(device))
         model.eval()
         log.info("SMPLest-X model loaded successfully")
     except Exception as e:
+        import traceback
         log.error(f"Failed to load model: {e}")
-        # Try alternative loading path
-        sys.path.insert(0, "/app/SMPLest-X/main")
-        from utils.inference_utils import load_model as load_smplestx
-        model = load_smplestx(config_path, checkpoint_path, device)
-        log.info("SMPLest-X loaded via alternative path")
+        log.error(traceback.format_exc())
+        try:
+            sys.path.insert(0, "/app/SMPLest-X")
+            from utils.inference_utils import load_model as load_smplestx
+            model = load_smplestx(config_path, checkpoint_path, device)
+            log.info("SMPLest-X loaded via alternative path")
+        except Exception as e2:
+            log.error(f"Alternative load also failed: {e2}")
 
 
 @asynccontextmanager
