@@ -5,8 +5,8 @@
 #
 # Deploy: bunx ai-gateway gpu deploy --image marcosremar/smplest-x:latest
 
-ARG BASE_IMAGE=nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
-FROM ${BASE_IMAGE}
+# Use CUDA 12.1 (matches hybrik-x, widely supported on Vast.ai hosts)
+FROM nvidia/cuda:12.1.0-cudnn8-devel-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
@@ -24,8 +24,8 @@ WORKDIR /app
 
 # ── PyTorch ──────────────────────────────────────────────────────────────────
 RUN pip install "numpy<2.0" "setuptools<70" wheel cython
-RUN pip install torch==2.4.1 torchvision==0.19.1 \
-    --index-url https://download.pytorch.org/whl/cu124
+RUN pip install torch==2.1.2 torchvision==0.16.2 \
+    --extra-index-url https://download.pytorch.org/whl/cu121
 
 # ── OpenMMLab stack ──────────────────────────────────────────────────────────
 RUN pip install openmim && \
