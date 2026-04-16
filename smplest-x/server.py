@@ -18,19 +18,33 @@ import os
 import sys
 import time
 import asyncio
+import traceback
 from contextlib import asynccontextmanager
 
-import cv2
-import numpy as np
-import torch
+# FastAPI imports first — server MUST start even if ML deps fail
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from PIL import Image
 from pydantic import BaseModel
-from scipy.spatial.transform import Rotation
 
 logging.basicConfig(level=logging.INFO, format="[smplest-x] %(message)s")
 log = logging.getLogger(__name__)
+
+# ML imports — lazy, with error capture
+_import_error = None
+try:
+    import cv2
+    import numpy as np
+    import torch
+    from PIL import Image
+    from scipy.spatial.transform import Rotation
+    log.info(f"ML imports OK — torch={torch.__version__} cuda={torch.cuda.is_available()}")
+except Exception as e:
+    _import_error = traceback.format_exc()
+    log.error(f"ML import failed: {e}")
+    # Stub modules so server can start
+    np = None
+    torch = None
+    cv2 = None
 
 # ─── Global model state ─────────────────────────────────────────────────────
 model = None
@@ -161,13 +175,16 @@ def _get_idle_metrics() -> dict:
 
 @app.get("/health")
 async def health():
-    return {
-        "status": "ok" if model is not None else "loading",
+    resp = {
+        "status": "error" if _import_error else ("ok" if model is not None else "loading"),
         "device": str(device) if device else "unknown",
         "model": "SMPLest-X",
         **_get_idle_metrics(),
         "capabilities": ["body", "hands", "face"],
     }
+    if _import_error:
+        resp["import_error"] = _import_error[-500:]
+    return resp
 
 
 @app.post("/predict")
