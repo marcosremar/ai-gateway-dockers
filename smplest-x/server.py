@@ -1,11 +1,14 @@
 """
 SMPLest-X FastAPI server — whole-body SMPL-X estimation with hand tracking.
 
-Exposes /health and /predict endpoints compatible with the video2anim pipeline.
+Exposes /health, /predict, /debug endpoints compatible with the video2anim pipeline.
 Output: SMPL-X 55-joint quaternions + 3D positions (body + hands + face).
 
 Key advantage over HybrIK: full hand articulation (15 joints per hand),
 critical for sign language (LIBRAS) applications.
+
+Loading strategy: background thread so /health responds immediately.
+All weights baked into Docker image — zero runtime downloads.
 
 Deploy via ai-gateway:
   bunx ai-gateway gpu deploy --image marcosremar/smplest-x:latest
@@ -18,8 +21,14 @@ import os
 import sys
 import time
 import asyncio
+import threading
 import traceback
-from contextlib import asynccontextmanager
+from typing import Optional
+
+# Set working directory to SMPLest-X root for relative paths in config
+SMPLESTX_ROOT = os.environ.get("SMPLESTX_ROOT", "/app/SMPLest-X")
+os.chdir(SMPLESTX_ROOT)
+sys.path.insert(0, SMPLESTX_ROOT)
 
 # FastAPI imports first — server MUST start even if ML deps fail
 from fastapi import FastAPI
@@ -29,7 +38,7 @@ from pydantic import BaseModel
 logging.basicConfig(level=logging.INFO, format="[smplest-x] %(message)s")
 log = logging.getLogger(__name__)
 
-# ML imports — lazy, with error capture
+# ─── ML imports (lazy, with error capture) ──────────────────────────────────
 _import_error = None
 try:
     import cv2
@@ -41,273 +50,347 @@ try:
 except Exception as e:
     _import_error = traceback.format_exc()
     log.error(f"ML import failed: {e}")
-    # Stub modules so server can start
     np = None
     torch = None
     cv2 = None
 
-# ─── Global model state ─────────────────────────────────────────────────────
-model = None
-device = None
-_load_error = None  # Captures traceback from load_model failures
+# ─── Global model state ────────────────────────────────────────────────────
+_model_ready = False
+_load_error = None
+_load_progress = "not started"
+_demoer = None
+_detector = None
+_cfg = None
+_device = None
 
 
-def download_checkpoint():
-    ckpt = os.environ.get("SMPLESTX_CHECKPOINT",
-        "/app/SMPLest-X/pretrained_models/smplest_x_h/smplest_x_h.pth.tar")
-    if os.path.exists(ckpt):
-        return ckpt
-    log.info("Downloading SMPLest-X checkpoint (8.2GB)...")
-    os.makedirs(os.path.dirname(ckpt), exist_ok=True)
+def _load_model_sync():
+    """Load SMPLest-X model. Runs in background thread so /health responds immediately."""
+    global _model_ready, _load_error, _load_progress
+    global _demoer, _detector, _cfg, _device
+
     try:
-        from huggingface_hub import hf_hub_download
-        hf_hub_download("waanqii/SMPLest-X", "smplest_x_h.pth.tar",
-            local_dir=os.path.dirname(ckpt))
-        log.info("Checkpoint downloaded")
-    except Exception as e:
-        log.error(f"Download failed: {e}")
-    return ckpt
+        _device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        log.info(f"Device: {_device}")
 
+        # ── Step 1: Load config ──────────────────────────────────────────
+        _load_progress = "loading config"
+        log.info("Loading config...")
 
-def load_model():
-    """Load SMPLest-X model with mmpose backend."""
-    global model, device
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    log.info(f"Loading SMPLest-X on {device}...")
+        from main.config import Config
 
-    download_checkpoint()
+        config_path = os.path.join(SMPLESTX_ROOT,
+                                   "pretrained_models/smplest_x_h/config_base.py")
+        log.info(f"Config: {config_path} (exists={os.path.exists(config_path)})")
+        _cfg = Config.load_config(config_path)
 
-    # SMPLest-X uses mmpose's top-down approach
-    # Config and checkpoint paths (baked into Docker image)
-    config_path = os.environ.get(
-        "SMPLESTX_CONFIG",
-        "/app/SMPLest-X/configs/config_smplest_x_h.py",
-    )
-    checkpoint_path = os.environ.get(
-        "SMPLESTX_CHECKPOINT",
-        "/app/SMPLest-X/pretrained_models/smplest_x_h/smplest_x_h.pth.tar",
-    )
+        # Override paths to point to baked-in files
+        _cfg.model.pretrained_model_path = os.path.join(
+            SMPLESTX_ROOT, "pretrained_models/smplest_x_h/smplest_x_h.pth.tar")
+        _cfg.model.human_model_path = os.path.join(
+            SMPLESTX_ROOT, "human_models/human_model_files")
+        _cfg.inference.detection.model_path = os.path.join(
+            SMPLESTX_ROOT, "pretrained_models/yolov8x.pt")
 
-    log.info(f"Config: {config_path} (exists={os.path.exists(config_path)})")
-    log.info(f"Checkpoint: {checkpoint_path} (exists={os.path.exists(checkpoint_path)})")
+        # Set log dirs (Tester parent class creates these)
+        for key in ["output_dir", "model_dir", "log_dir", "result_dir"]:
+            _cfg.log[key] = "/tmp/smplest_x_logs"
+        os.makedirs("/tmp/smplest_x_logs", exist_ok=True)
 
-    global _load_error
-    try:
-        from mmpose.apis import init_model as init_pose_model
-        log.info("mmpose imported OK — loading model...")
-        model = init_pose_model(config_path, checkpoint_path, device=str(device))
-        model.eval()
+        log.info(f"Checkpoint: {_cfg.model.pretrained_model_path} "
+                 f"(exists={os.path.exists(_cfg.model.pretrained_model_path)})")
+        log.info(f"Human models: {_cfg.model.human_model_path} "
+                 f"(exists={os.path.isdir(_cfg.model.human_model_path)})")
+
+        # ── Step 2: Build model (loads 8.2GB checkpoint) ─────────────────
+        _load_progress = "building model (loading checkpoint)"
+        log.info("Building model via Tester._make_model()...")
+
+        from main.base import Tester
+        _demoer = Tester(_cfg)
+        _demoer._make_model()
+        log.info("Model built successfully")
+
+        # ── Step 3: Load YOLO detector ───────────────────────────────────
+        _load_progress = "loading YOLO detector"
+        log.info("Loading YOLO detector...")
+
+        from ultralytics import YOLO
+        yolo_path = _cfg.inference.detection.model_path
+        if not os.path.exists(yolo_path):
+            log.info("YOLOv8x not found, will auto-download...")
+            yolo_path = "yolov8x.pt"
+        _detector = YOLO(yolo_path)
+        log.info("YOLO loaded")
+
+        # ── Done ─────────────────────────────────────────────────────────
+        _model_ready = True
         _load_error = None
-        log.info("SMPLest-X model loaded successfully")
+        _load_progress = "ready"
+        log.info("SMPLest-X fully loaded and ready!")
+
     except Exception as e:
         _load_error = traceback.format_exc()
+        _load_progress = f"failed: {str(e)[:200]}"
         log.error(f"Failed to load model: {e}")
         log.error(_load_error)
-        try:
-            sys.path.insert(0, "/app/SMPLest-X")
-            from utils.inference_utils import load_model as load_smplestx
-            model = load_smplestx(config_path, checkpoint_path, device)
-            _load_error = None
-            log.info("SMPLest-X loaded via alternative path")
-        except Exception as e2:
-            _load_error = traceback.format_exc()
-            log.error(f"Alternative load also failed: {e2}")
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    load_model()
+# ─── FastAPI app ────────────────────────────────────────────────────────────
+app = FastAPI(title="SMPLest-X")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+# Idle tracking middleware (must be added before app starts)
+try:
+    from idle_watchdog import add_idle_middleware, get_health_metrics
+    add_idle_middleware(app)
+except ImportError:
+    def get_health_metrics():
+        return {}
+
+
+@app.on_event("startup")
+async def startup():
+    if _import_error:
+        log.error("Skipping model load — ML import failed")
+        return
+    # Load model in background thread
+    thread = threading.Thread(target=_load_model_sync, daemon=True)
+    thread.start()
+    log.info("Model loading started in background thread")
+    # Start idle watchdog
     try:
         from idle_watchdog import start_watchdog
         asyncio.create_task(start_watchdog())
     except ImportError:
         pass
-    yield
 
 
-app = FastAPI(title="SMPLest-X", lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
-
-# Idle tracking middleware (must be added before app starts)
-try:
-    from idle_watchdog import add_idle_middleware
-    add_idle_middleware(app)
-except ImportError:
-    pass
-
-
+# ─── Request/Response models ───────────────────────────────────────────────
 class PredictRequest(BaseModel):
     image_base64: str
     include_vertices: bool = False
-    flip_test: bool = False
 
 
-def decode_image(b64: str) -> np.ndarray:
-    raw = base64.b64decode(b64)
-    img = Image.open(io.BytesIO(raw)).convert("RGB")
-    return np.array(img)
-
-
-def rotmat_to_quat_wxyz(rotmats: np.ndarray) -> list:
-    """Convert rotation matrices (N,3,3) to quaternions [w,x,y,z] list."""
-    quats = []
-    for R in rotmats:
-        r = Rotation.from_matrix(R)
-        q = r.as_quat()  # [x,y,z,w] scipy convention
-        quats.append([float(q[3]), float(q[0]), float(q[1]), float(q[2])])  # → [w,x,y,z]
-    return quats
-
-
-def axis_angle_to_quat_wxyz(aa: np.ndarray) -> list:
+# ─── Rotation utilities ────────────────────────────────────────────────────
+def axis_angle_to_quat_wxyz(aa: "np.ndarray") -> list:
     """Convert axis-angle (N,3) to quaternions [w,x,y,z]."""
     quats = []
-    for v in aa:
+    for v in np.array(aa).reshape(-1, 3):
         r = Rotation.from_rotvec(v)
-        q = r.as_quat()  # [x,y,z,w]
+        q = r.as_quat()  # scipy: [x,y,z,w]
         quats.append([float(q[3]), float(q[0]), float(q[1]), float(q[2])])
     return quats
 
 
+def rotmat_to_quat_wxyz(rotmats: "np.ndarray") -> list:
+    """Convert rotation matrices (N,3,3) to quaternions [w,x,y,z]."""
+    quats = []
+    for R in np.array(rotmats).reshape(-1, 3, 3):
+        r = Rotation.from_matrix(R)
+        q = r.as_quat()
+        quats.append([float(q[3]), float(q[0]), float(q[1]), float(q[2])])
+    return quats
 
-def _get_idle_metrics() -> dict:
-    """Get idle tracking metrics for ai-gateway health polling."""
-    try:
-        from idle_watchdog import get_health_metrics
-        return get_health_metrics()
-    except ImportError:
-        return {}
+
+def _to_quat(tensor, n_joints: int) -> list:
+    """Auto-detect rotation format (axis-angle or rotmat) and convert to quats."""
+    arr = tensor.detach().cpu().numpy()
+    # Remove batch dim
+    if arr.ndim == 4:
+        arr = arr[0]
+    elif arr.ndim == 3 and arr.shape[0] == 1:
+        arr = arr[0]
+    # Detect format
+    if arr.ndim == 3 and arr.shape[-1] == 3 and arr.shape[-2] == 3:
+        # Rotation matrices (N, 3, 3)
+        return rotmat_to_quat_wxyz(arr[:n_joints])
+    else:
+        # Axis-angle (N*3,) or (N, 3)
+        return axis_angle_to_quat_wxyz(arr.reshape(-1, 3)[:n_joints])
 
 
+# ─── Endpoints ──────────────────────────────────────────────────────────────
 @app.get("/health")
 async def health():
     resp = {
-        "status": "error" if _import_error else ("ok" if model is not None else "loading"),
-        "device": str(device) if device else "unknown",
+        "status": "error" if _import_error else ("ok" if _model_ready else "loading"),
         "model": "SMPLest-X",
-        **_get_idle_metrics(),
+        "model_ready": _model_ready,
+        "load_progress": _load_progress,
+        "device": str(_device) if _device else "unknown",
+        **get_health_metrics(),
         "capabilities": ["body", "hands", "face"],
     }
     if _import_error:
         resp["import_error"] = _import_error[-500:]
     if _load_error:
-        resp["load_error"] = _load_error[-500:]
+        resp["load_error"] = _load_error[-1000:]
     return resp
 
 
 @app.post("/predict")
 async def predict(req: PredictRequest):
-    if model is None:
-        return {"error": "model not loaded"}, 503
+    if not _model_ready:
+        return {"error": "model not loaded", "load_progress": _load_progress}
 
     t0 = time.time()
-    img = decode_image(req.image_base64)
+
+    # Decode image
+    raw = base64.b64decode(req.image_base64)
+    img = np.array(Image.open(io.BytesIO(raw)).convert("RGB"))
     img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+    original_img = img_bgr.copy()
+
+    # ── Person detection with YOLO ──────────────────────────────────────
+    det_conf = 0.5
+    if _cfg and hasattr(_cfg, "inference"):
+        det_conf = _cfg.inference.detection.get("conf", 0.5)
+
+    det_results = _detector.predict(
+        img_bgr, device=str(_device), classes=0,
+        conf=det_conf, verbose=False)
+
+    if not det_results or len(det_results[0].boxes) == 0:
+        return {
+            "error": "no person detected",
+            "latency_ms": round((time.time() - t0) * 1000, 1),
+        }
+
+    # Pick highest-confidence detection
+    boxes = det_results[0].boxes
+    best_idx = boxes.conf.argmax().item()
+    bbox_xyxy = boxes.xyxy[best_idx].cpu().numpy()  # [x1, y1, x2, y2]
+
+    # ── Preprocess: crop + resize ───────────────────────────────────────
+    x1, y1, x2, y2 = bbox_xyxy
+    cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+    w, h = x2 - x1, y2 - y1
+    bbox_ratio = 1.2
+    if _cfg and hasattr(_cfg, "data"):
+        bbox_ratio = _cfg.data.get("bbox_ratio", 1.2)
+    w *= bbox_ratio
+    h *= bbox_ratio
+
+    input_img_shape = (512, 384)
+    if _cfg and hasattr(_cfg, "model"):
+        input_img_shape = tuple(_cfg.model.get("input_img_shape", (512, 384)))
+
+    # Try SMPLest-X preprocessing (generate_patch_image)
+    try:
+        from common.utils.preprocessing import generate_patch_image
+        bbox_xywh = np.array([cx - w / 2, cy - h / 2, w, h])
+        patch_img, _, _ = generate_patch_image(
+            original_img, bbox_xywh, False, 1.0, 0.0, input_img_shape)
+    except Exception:
+        # Fallback: simple crop + resize
+        x1c = max(0, int(cx - w / 2))
+        y1c = max(0, int(cy - h / 2))
+        x2c = min(img_bgr.shape[1], int(cx + w / 2))
+        y2c = min(img_bgr.shape[0], int(cy + h / 2))
+        crop = img_bgr[y1c:y2c, x1c:x2c]
+        if crop.size == 0:
+            crop = img_bgr
+        patch_img = cv2.resize(crop, (input_img_shape[1], input_img_shape[0]))
+
+    # Transform: normalize to ImageNet stats
+    import torchvision.transforms as T
+    transform = T.Compose([
+        T.ToTensor(),
+        T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ])
+    img_tensor = transform(patch_img.astype(np.float32) / 255.0)
+
+    # ── Model inference ─────────────────────────────────────────────────
+    inputs = {"img": img_tensor.unsqueeze(0).to(_device)}
+    targets = {}
+    meta_info = {}
 
     with torch.no_grad():
-        # SMPLest-X inference — returns SMPL-X parameters
-        # The exact API depends on the model variant, but the output is:
-        #   body_pose: (1, 21, 3, 3) rotation matrices or (1, 63) axis-angle
-        #   left_hand_pose: (1, 15, 3) axis-angle
-        #   right_hand_pose: (1, 15, 3) axis-angle
-        #   global_orient: (1, 3) axis-angle
-        #   betas: (1, 10)
-        #   expression: (1, 10)
-        #   jaw_pose: (1, 3)
-        #   joints_3d: (1, N, 3)
-        results = model(img_bgr)
+        out = _demoer.model(inputs, targets, meta_info, "test")
 
-    # Extract SMPL-X parameters from results
-    # Handle both mmpose dict output and direct tensor output
-    if isinstance(results, dict):
-        pred = results
-    elif hasattr(results, "pred_instances"):
-        inst = results.pred_instances
-        pred = {
-            "body_pose": inst.body_pose if hasattr(inst, "body_pose") else None,
-            "left_hand_pose": inst.left_hand_pose if hasattr(inst, "left_hand_pose") else None,
-            "right_hand_pose": inst.right_hand_pose if hasattr(inst, "right_hand_pose") else None,
-            "global_orient": inst.global_orient if hasattr(inst, "global_orient") else None,
-            "betas": inst.betas if hasattr(inst, "betas") else None,
-            "expression": inst.expression if hasattr(inst, "expression") else None,
-            "jaw_pose": inst.jaw_pose if hasattr(inst, "jaw_pose") else None,
-            "keypoints_3d": inst.keypoints_3d if hasattr(inst, "keypoints_3d") else None,
-        }
-    else:
-        pred = {}
-
-    # Build unified 55-joint quaternion array (same as HybrIK output format)
-    # SMPL-X order: [global, body(21), jaw(1), eyes(2), left_hand(15), right_hand(15)] = 55
+    # ── Extract SMPL-X parameters ───────────────────────────────────────
+    # Build unified 55-joint quaternion array matching HybrIK output format:
+    # [global(1), body(21), jaw(1), eyes(2), left_hand(15), right_hand(15)]
     theta_quat = []
+    out_keys = list(out.keys()) if isinstance(out, dict) else []
 
-    # Joint 0: Global orient (pelvis)
-    if pred.get("global_orient") is not None:
-        go = np.array(pred["global_orient"]).reshape(-1, 3)
-        theta_quat.extend(axis_angle_to_quat_wxyz(go))
+    # Joint 0: Global orient / root pose
+    for key in ["smplx_root_pose", "global_orient", "root_pose"]:
+        if key in out:
+            theta_quat.extend(_to_quat(out[key], 1))
+            break
     else:
         theta_quat.append([1, 0, 0, 0])
 
     # Joints 1-21: Body pose
-    if pred.get("body_pose") is not None:
-        bp = np.array(pred["body_pose"])
-        if bp.ndim == 3 and bp.shape[-1] == 3 and bp.shape[-2] == 3:
-            # Rotation matrices (N, 3, 3)
-            bp = bp.reshape(-1, 3, 3)
-            theta_quat.extend(rotmat_to_quat_wxyz(bp))
-        else:
-            # Axis-angle (N, 3) or (63,)
-            bp = bp.reshape(-1, 3)
-            theta_quat.extend(axis_angle_to_quat_wxyz(bp))
+    for key in ["smplx_body_pose", "body_pose"]:
+        if key in out:
+            theta_quat.extend(_to_quat(out[key], 21))
+            break
     else:
         theta_quat.extend([[1, 0, 0, 0]] * 21)
 
     # Joint 22: Jaw
-    if pred.get("jaw_pose") is not None:
-        jp = np.array(pred["jaw_pose"]).reshape(-1, 3)
-        theta_quat.extend(axis_angle_to_quat_wxyz(jp))
+    for key in ["smplx_jaw_pose", "jaw_pose"]:
+        if key in out:
+            theta_quat.extend(_to_quat(out[key], 1))
+            break
     else:
         theta_quat.append([1, 0, 0, 0])
 
     # Joints 23-24: Eyes (usually identity)
     theta_quat.extend([[1, 0, 0, 0]] * 2)
 
-    # Joints 25-39: Left hand (15 joints)
-    if pred.get("left_hand_pose") is not None:
-        lh = np.array(pred["left_hand_pose"]).reshape(-1, 3)
-        theta_quat.extend(axis_angle_to_quat_wxyz(lh))
+    # Joints 25-39: Left hand (15 joints) ★
+    has_hands = False
+    for key in ["smplx_lhand_pose", "left_hand_pose", "lhand_pose"]:
+        if key in out:
+            theta_quat.extend(_to_quat(out[key], 15))
+            has_hands = True
+            break
     else:
         theta_quat.extend([[1, 0, 0, 0]] * 15)
 
-    # Joints 40-54: Right hand (15 joints)
-    if pred.get("right_hand_pose") is not None:
-        rh = np.array(pred["right_hand_pose"]).reshape(-1, 3)
-        theta_quat.extend(axis_angle_to_quat_wxyz(rh))
+    # Joints 40-54: Right hand (15 joints) ★
+    for key in ["smplx_rhand_pose", "right_hand_pose", "rhand_pose"]:
+        if key in out:
+            theta_quat.extend(_to_quat(out[key], 15))
+            has_hands = True
+            break
     else:
         theta_quat.extend([[1, 0, 0, 0]] * 15)
 
     # 3D joints
     joints_3d = None
-    if pred.get("keypoints_3d") is not None:
-        j3d = np.array(pred["keypoints_3d"])
-        if j3d.ndim == 3:
-            j3d = j3d[0]  # remove batch dim
-        joints_3d = j3d.tolist()
+    for key in ["smplx_joint_cam", "joint_cam", "joints_3d", "keypoints_3d"]:
+        if key in out:
+            j3d = out[key].detach().cpu().numpy()
+            if j3d.ndim == 3:
+                j3d = j3d[0]
+            joints_3d = j3d.tolist()
+            break
 
-    # Betas
+    # Shape (betas)
     betas = None
-    if pred.get("betas") is not None:
-        betas = np.array(pred["betas"]).flatten().tolist()
+    for key in ["smplx_shape", "betas", "shape"]:
+        if key in out:
+            betas = out[key].detach().cpu().numpy().flatten().tolist()
+            break
 
     # Expression
     expression = None
-    if pred.get("expression") is not None:
-        expression = np.array(pred["expression"]).flatten().tolist()
+    for key in ["smplx_expr", "expression", "expr"]:
+        if key in out:
+            expression = out[key].detach().cpu().numpy().flatten().tolist()
+            break
 
-    # Translation
+    # Translation (use pelvis joint if available)
     transl = None
-    if pred.get("transl") is not None:
-        transl = np.array(pred["transl"]).flatten().tolist()
-    elif joints_3d and len(joints_3d) > 0:
-        transl = joints_3d[0]  # pelvis as root translation
+    if joints_3d and len(joints_3d) > 0:
+        transl = joints_3d[0]
 
     latency_ms = (time.time() - t0) * 1000
 
@@ -319,51 +402,77 @@ async def predict(req: PredictRequest):
         "transl": transl,
         "latency_ms": round(latency_ms, 1),
         "model": "smplest-x",
-        "has_hands": pred.get("left_hand_pose") is not None,
+        "has_hands": has_hands,
         "n_joints": len(theta_quat),
+        "bbox": bbox_xyxy.tolist(),
+        "output_keys": out_keys,
     }
-
-
 
 
 @app.get("/debug")
 async def debug():
-    """Diagnostic endpoint — shows checkpoint status, import errors, model state."""
-    import traceback
-    info = {"device": str(device), "model_loaded": model is not None}
-    
+    """Diagnostic endpoint — shows file status, imports, model state."""
+    info = {
+        "device": str(_device) if _device else "unknown",
+        "model_ready": _model_ready,
+        "load_progress": _load_progress,
+        "cwd": os.getcwd(),
+    }
+
+    # Check body model files
+    body_dir = os.path.join(SMPLESTX_ROOT, "human_models/human_model_files")
+    for subdir in ["smplx", "smpl", "mano"]:
+        d = os.path.join(body_dir, subdir)
+        if os.path.isdir(d):
+            files = os.listdir(d)
+            info[f"body_{subdir}"] = files
+        else:
+            info[f"body_{subdir}"] = "MISSING"
+
     # Check checkpoint
-    import glob
-    ckpt_dirs = ["/app/checkpoints", "/app/WHAM/checkpoints", "/app/GVHMR/inputs/checkpoints",
-                 "/app/SMPLest-X/pretrained_models", "/app/TokenHMR/data", "/app/TRAM/data"]
-    for d in ckpt_dirs:
-        files = glob.glob(f"{d}/**/*", recursive=True)
-        if files:
-            info[f"files_in_{d}"] = [f"{f} ({os.path.getsize(f)//1024}KB)" for f in files[:20] if os.path.isfile(f)]
-    
-    # Try imports
-    test_imports = ["scipy", "scipy.spatial.transform", "smplx", "cv2", "torch"]
-    for mod in test_imports:
+    ckpt = os.path.join(SMPLESTX_ROOT,
+                        "pretrained_models/smplest_x_h/smplest_x_h.pth.tar")
+    info["checkpoint_exists"] = os.path.exists(ckpt)
+    if os.path.exists(ckpt):
+        info["checkpoint_size_gb"] = round(os.path.getsize(ckpt) / (1024 ** 3), 2)
+
+    # Check config
+    cfg_path = os.path.join(SMPLESTX_ROOT,
+                            "pretrained_models/smplest_x_h/config_base.py")
+    info["config_exists"] = os.path.exists(cfg_path)
+
+    # YOLO
+    yolo_path = os.path.join(SMPLESTX_ROOT, "pretrained_models/yolov8x.pt")
+    info["yolo_exists"] = os.path.exists(yolo_path)
+
+    # Test imports
+    test_mods = ["scipy", "smplx", "cv2", "torch", "mmcv", "mmpose",
+                 "mmdet", "mmengine", "ultralytics"]
+    for mod in test_mods:
         try:
-            __import__(mod)
-            info[f"import_{mod}"] = "ok"
+            m = __import__(mod)
+            ver = getattr(m, "__version__", "ok")
+            info[f"import_{mod}"] = ver
         except Exception as e:
-            info[f"import_{mod}"] = str(e)[:100]
-    
-    # Try model-specific import
-    try:
-        import numpy
-        info["numpy_version"] = numpy.__version__
-    except: pass
-    
-    # Capture load_model error
-    if model is None:
-        try:
-            load_model()
-            info["reload_result"] = "model loaded!" if model is not None else "still None"
-        except Exception as e:
-            info["reload_error"] = traceback.format_exc()[-500:]
-    
+            info[f"import_{mod}"] = f"FAIL: {str(e)[:80]}"
+
+    if np is not None:
+        info["numpy_version"] = np.__version__
+    if torch is not None:
+        info["torch_version"] = torch.__version__
+        info["cuda_available"] = torch.cuda.is_available()
+        if torch.cuda.is_available():
+            info["gpu_name"] = torch.cuda.get_device_name(0)
+            info["gpu_memory_gb"] = round(
+                torch.cuda.get_device_properties(0).total_mem / (1024 ** 3), 1)
+
+    if _load_error:
+        info["load_error"] = _load_error[-2000:]
+
+    # Try to reload model if it failed (for debugging)
+    if not _model_ready and _load_error and "reload" not in info:
+        info["hint"] = "Model failed to load. Check load_error for details."
+
     return info
 
 
