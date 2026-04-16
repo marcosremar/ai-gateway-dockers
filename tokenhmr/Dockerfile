@@ -1,14 +1,8 @@
-# ── TokenHMR — Token-based Human Mesh Recovery ───────────────────────────────
-# Occlusion-robust pose estimation via tokenized representation.
+# ── TokenHMR — Occlusion-Robust Human Mesh Recovery ──────────────────────────
+# Tokenized pose representation for partial occlusion. CVPR 2024.
+# Repo: github.com/saidwivedi/TokenHMR
 #
-# Paper: "TokenHMR: Advancing Human Mesh Recovery with a Tokenized Pose Representation" (CVPR 2024)
-# Repo:  github.com/saidwivedi/TokenHMR
-#
-# Checkpoint: tokenhmr_model_latest.ckpt from is.tue.mpg.de
-# NOTE: Requires registration at tokenhmr.is.tue.mpg.de for download
-#
-# Deploy via ai-gateway (never build locally):
-#   bunx ai-gateway gpu deploy --image marcosremar/tokenhmr:latest
+# Deploy: bunx ai-gateway gpu deploy --image marcosremar/tokenhmr:latest
 
 ARG BASE_IMAGE=nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
 FROM ${BASE_IMAGE}
@@ -26,37 +20,37 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# ── PyTorch ──────────────────────────────────────────────────────────────────
+# ── PyTorch (TokenHMR tested with 2.1.0+cu118, but 2.4+cu124 works) ─────────
 RUN pip install "numpy<2.0" "setuptools<70" wheel
 RUN pip install torch==2.4.1 torchvision==0.19.1 \
     --index-url https://download.pytorch.org/whl/cu124
 
 # ── Clone TokenHMR ───────────────────────────────────────────────────────────
 RUN git clone --depth 1 https://github.com/saidwivedi/TokenHMR.git /app/TokenHMR
-WORKDIR /app/TokenHMR
-RUN pip install -e . 2>/dev/null || pip install -r requirements.txt 2>/dev/null || true
 
-# ── Additional deps ──────────────────────────────────────────────────────────
+# ── Install TokenHMR + deps ──────────────────────────────────────────────────
+WORKDIR /app/TokenHMR
+RUN pip install -r requirements.txt 2>/dev/null || true
+RUN pip install -e . 2>/dev/null || true
+
+# ── Detectron2 (for demo/inference) ──────────────────────────────────────────
+RUN pip install 'git+https://github.com/facebookresearch/detectron2.git' 2>/dev/null || true
+
+# ── Core deps ────────────────────────────────────────────────────────────────
 RUN pip install smplx scipy einops timm yacs
 
-# ── Download checkpoint (requires prior registration) ────────────────────────
-# TokenHMR checkpoints require accepting license at tokenhmr.is.tue.mpg.de
-# Download manually and place in /app/checkpoints/ or mount at runtime:
-#   wget "https://download.is.tue.mpg.de/download.php?domain=tokenhmr&sfile=tokenhmr_model_latest.zip" -O tokenhmr.zip
-RUN mkdir -p /app/checkpoints && \
-    echo "Download checkpoint from https://download.is.tue.mpg.de/download.php?domain=tokenhmr&sfile=tokenhmr_model_latest.zip" \
-    > /app/checkpoints/DOWNLOAD_INSTRUCTIONS.txt
+ENV PYTHONPATH="/app/TokenHMR:${PYTHONPATH}"
 
-# ── SMPL body model placeholder ─────────────────────────────────────────────
-RUN mkdir -p /app/body_models/smpl
+# ── Checkpoint + SMPL placeholder ────────────────────────────────────────────
+RUN mkdir -p /app/checkpoints /app/body_models/smpl
 
 # ── FastAPI server ───────────────────────────────────────────────────────────
 RUN pip install fastapi "uvicorn[standard]" python-multipart Pillow opencv-python-headless
 
-WORKDIR /app
-# Fix numpy binary compat with scipy
+# ── Pin numpy LAST ───────────────────────────────────────────────────────────
 RUN pip install "numpy<2.0" --force-reinstall --quiet
 
+WORKDIR /app
 COPY server.py /app/server.py
 COPY idle_watchdog.py /app/idle_watchdog.py
 COPY start.sh /app/start.sh

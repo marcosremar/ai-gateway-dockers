@@ -1,14 +1,9 @@
-# ── SMPLest-X — Whole-Body SMPL-X Estimation with Hand Tracking ──────────────
-# Expressive pose estimation: body + hands + face from a single image.
-# Key advantage: full hand articulation (15 joints/hand) — critical for LIBRAS.
+# ── SMPLest-X — Whole-Body SMPL-X with Hand Tracking ─────────────────────────
+# Full hand articulation (15 joints/hand) — critical for LIBRAS.
+# Repo: github.com/MotrixLab/SMPLest-X (TPAMI 2025)
+# Existing Docker ref: wcwcw/smplerx_inference:v0.2 (SMPLer-X, predecessor)
 #
-# Paper: "SMPLest-X: Ultimate Scaling for Expressive Human Pose and Shape"
-# Repo:  github.com/MotrixLab/SMPLest-X (TPAMI 2025)
-#
-# Checkpoint: smplest_x_h.pth.tar (8.2GB) from HuggingFace waanqii/SMPLest-X
-#
-# Deploy via ai-gateway (never build locally):
-#   bunx ai-gateway gpu deploy --image marcosremar/smplest-x:latest
+# Deploy: bunx ai-gateway gpu deploy --image marcosremar/smplest-x:latest
 
 ARG BASE_IMAGE=nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
 FROM ${BASE_IMAGE}
@@ -20,7 +15,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.10 python3.10-dev python3-pip python3.10-venv \
     build-essential git wget curl \
-    libgl1 libglib2.0-0 libsm6 libxrender1 libxext6 && \
+    libgl1 libglib2.0-0 libsm6 libxrender1 libxext6 \
+    python3-opengl libosmesa6 && \
     update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.10 1 && \
     rm -rf /var/lib/apt/lists/*
 
@@ -40,28 +36,31 @@ RUN git clone --depth 1 https://github.com/MotrixLab/SMPLest-X.git /app/SMPLest-
 
 # ── Install SMPLest-X deps ──────────────────────────────────────────────────
 WORKDIR /app/SMPLest-X
-RUN pip install smplx scipy ultralytics
+RUN pip install -r requirements.txt 2>/dev/null || true
+RUN pip install smplx scipy ultralytics pyopengl==3.1.4
+ENV PYTHONPATH="/app/SMPLest-X:${PYTHONPATH}"
 
-# ── Checkpoint deps (downloaded at startup via start.sh) ─────────────────────
+# ── Checkpoint placeholder (downloaded at startup via start.sh) ──────────────
 RUN pip install huggingface_hub && \
     mkdir -p /app/SMPLest-X/pretrained_models/smplest_x_h
 
-# ── SMPL-X body model placeholder (mount or bake) ───────────────────────────
-RUN mkdir -p /app/SMPLest-X/human_models/human_model_files/smplx /app/SMPLest-X/human_models/human_model_files/smpl
+# ── SMPL-X body model placeholder ───────────────────────────────────────────
+RUN mkdir -p /app/SMPLest-X/human_models/human_model_files/smplx \
+             /app/SMPLest-X/human_models/human_model_files/smpl
 
 # ── FastAPI server ───────────────────────────────────────────────────────────
 RUN pip install fastapi "uvicorn[standard]" python-multipart Pillow opencv-python-headless
 
-WORKDIR /app
-# Fix numpy binary compat with scipy
+# ── Pin numpy LAST ───────────────────────────────────────────────────────────
 RUN pip install "numpy<2.0" --force-reinstall --quiet
 
+WORKDIR /app
 COPY server.py /app/server.py
 COPY idle_watchdog.py /app/idle_watchdog.py
 COPY start.sh /app/start.sh
 RUN chmod +x /app/start.sh
 
-ENV SMPLESTX_CONFIG=/app/SMPLest-X/main/config/config_smpler_x_h.py \
+ENV SMPLESTX_CONFIG=/app/SMPLest-X/configs/config_smplest_x_h.py \
     SMPLESTX_CHECKPOINT=/app/SMPLest-X/pretrained_models/smplest_x_h/smplest_x_h.pth.tar
 
 EXPOSE 8000
