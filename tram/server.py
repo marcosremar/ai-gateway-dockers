@@ -56,8 +56,7 @@ def load_model():
 async def lifespan(app: FastAPI):
     load_model()
     try:
-        from idle_watchdog import add_idle_middleware, start_watchdog
-        add_idle_middleware(app)
+        from idle_watchdog import start_watchdog
         asyncio.create_task(start_watchdog())
     except ImportError:
         pass
@@ -66,6 +65,13 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="TRAM", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+# Idle tracking middleware (must be added before app starts)
+try:
+    from idle_watchdog import add_idle_middleware
+    add_idle_middleware(app)
+except ImportError:
+    pass
 
 
 class PredictRequest(BaseModel):

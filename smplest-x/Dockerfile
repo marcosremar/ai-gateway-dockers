@@ -53,6 +53,9 @@ RUN mkdir -p /app/SMPLest-X/human_models/human_model_files/smplx /app/SMPLest-X/
 RUN pip install fastapi "uvicorn[standard]" python-multipart Pillow opencv-python-headless
 
 WORKDIR /app
+# Fix numpy binary compat with scipy
+RUN pip install "numpy<2.0" --force-reinstall --quiet
+
 COPY server.py /app/server.py
 COPY idle_watchdog.py /app/idle_watchdog.py
 COPY start.sh /app/start.sh
