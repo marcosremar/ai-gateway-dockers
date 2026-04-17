@@ -25,9 +25,16 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 # System deps — minimal for inference only
 # aria2 + zstd: multi-connection downloads (~30% faster than curl/single-stream)
+# crun: C-based OCI runtime, ~2x faster container startup than runc. Included
+# here so it is available as the in-image OCI runtime when the host selects
+# it. Whether it is actually used depends on the host's Docker runtime
+# configuration — on RunPod / Vast.ai the runtime is fixed by the provider
+# (no --runtime flag exposed via their API), so this install is forward-
+# compatible plumbing: a later TensorDock cloud-init (or self-hosted pod)
+# can point Docker at crun without another image rebuild.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.11 python3.11-venv python3.11-dev python3-pip \
-    ffmpeg libsndfile1 curl aria2 zstd && \
+    ffmpeg libsndfile1 curl aria2 zstd crun && \
     ln -sf /usr/bin/python3.11 /usr/bin/python3 && \
     rm -rf /var/lib/apt/lists/*
 
