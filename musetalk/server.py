@@ -1,18 +1,26 @@
 """
 MuseTalk Service — FastAPI wrapper pro ai-gateway.
 
-Endpoints:
-  GET  /health                   — status GPU + modelos
-  POST /v1/lipsync               — (multipart) image + audio → MP4
-  GET  /v1/demo                  — HTML mínimo pra teste manual
-  WS   /v1/stream                — (opcional v2) áudio PCM stream → frames
+Dois caminhos de inferência:
 
-Modelo: TMElyralab/MuseTalk V1.5 (latent-diffusion lip sync).
-Compat: herda o pipeline do fork ruxir-ig/MuseTalk-API (montado em /app).
+1. POST /v1/lipsync (one-shot, file-based)
+   Multipart: image (PNG/JPG/MP4) + audio (WAV/MP3) → MP4 de saída.
+   Delega pro MuseTalkInference.generate() original do fork ruxir-ig.
+
+2. WS /v1/stream (streaming real-time)
+   Cliente envia uma mensagem JSON de init com a imagem de referência
+   (base64) e depois binários de áudio PCM s16le 16kHz mono. Servidor
+   responde com JSON de ready e depois com binários JPEG dos frames.
+
+   Otimização-chave: preprocessing da imagem (face detection + VAE
+   encode das latents) acontece UMA vez no init e fica em cache na
+   sessão. Os chunks de áudio só rodam whisper→PE→UNet→VAE decode→blend,
+   que é a hot path que o paper cita como 30fps+.
 
 Env:
   IDLE_TIMEOUT_MIN   — auto-shutdown depois de inativo (default 15; 0=off)
-  MUSETALK_MODELS_DIR— diretório de pesos (default /app/models)
+  MUSETALK_MODELS_DIR — diretório de pesos (default /app/models)
+  MUSETALK_STREAM_CHUNK_MS — ms de áudio por chunk emitido (default 1000)
 """
 
 import asyncio
@@ -23,29 +31,42 @@ import sys
 import tempfile
 import time
 import traceback
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Optional
 
+import cv2
+import numpy as np
 import torch
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, Response, StreamingResponse
+from fastapi.responses import HTMLResponse, Response
 from pydantic import BaseModel
 import uvicorn
 
-# idle_watchdog fica ao lado do server.py, importação local
 from idle_watchdog import add_idle_middleware, start_watchdog, touch_activity
 
-# MuseTalk-API (fork montado em /app/musetalk_api)
 sys.path.insert(0, "/app")
 
-# Inference engine do fork — lazy import para não quebrar o /health antes dos
-# pesos baixarem.
+# ── Inference engine + streaming state ──────────────────────────────────────
+
 inference_engine = None
 load_error: Optional[str] = None
 load_traceback: Optional[str] = None
 model_loaded = False
+
+# sessionId -> preprocessed reference cache. Cada entrada é um dict com:
+#   frame          : np.ndarray BGR da imagem de referência
+#   coord          : bbox do rosto (x1, y1, x2, y2)
+#   latent         : tensor VAE encode do face crop 256x256
+#   fp             : FaceParsing instance (usado no blending)
+#   extra_margin   : margem pra blending
+#   parsing_mode   : 'jaw' ou 'raw'
+stream_sessions: Dict[str, Dict[str, Any]] = {}
+
+# Limite: expira sessões sem atividade após N segundos
+STREAM_SESSION_TTL = 600
 
 
 def _load_inference_engine():
@@ -69,18 +90,29 @@ def _load_inference_engine():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Carrega o modelo em thread separada pra não bloquear startup HTTP
     print("[musetalk] Startup — iniciando carga de modelos em background...", flush=True)
     asyncio.get_event_loop().run_in_executor(None, _load_inference_engine)
     asyncio.create_task(start_watchdog())
+    asyncio.create_task(_expire_stream_sessions())
     yield
     print("[musetalk] Shutdown", flush=True)
 
 
+async def _expire_stream_sessions():
+    """Remove sessões WS que ficaram idle mais que STREAM_SESSION_TTL segundos."""
+    while True:
+        await asyncio.sleep(60)
+        now = time.time()
+        expired = [sid for sid, s in stream_sessions.items() if (now - s.get("last_use", 0)) > STREAM_SESSION_TTL]
+        for sid in expired:
+            stream_sessions.pop(sid, None)
+            print(f"[musetalk] Session {sid} expirada", flush=True)
+
+
 app = FastAPI(
     title="MuseTalk Service",
-    description="Real-time audio-driven lip-sync para o ai-gateway.",
-    version="0.1.0",
+    description="Real-time audio-driven lip-sync pro ai-gateway.",
+    version="0.2.0",
     lifespan=lifespan,
 )
 
@@ -104,6 +136,7 @@ class HealthResponse(BaseModel):
     gpu_name: Optional[str] = None
     gpu_vram_gb: Optional[float] = None
     load_error: Optional[str] = None
+    active_streams: int = 0
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -115,43 +148,27 @@ async def health():
         gpu_vram_gb = round(torch.cuda.get_device_properties(0).total_memory / (1024 ** 3), 1)
 
     if load_error:
-        return HealthResponse(
-            status="error",
-            model_loaded=False,
-            gpu_available=gpu_available,
-            gpu_name=gpu_name,
-            gpu_vram_gb=gpu_vram_gb,
-            load_error=load_error,
-        )
+        return HealthResponse(status="error", model_loaded=False, gpu_available=gpu_available,
+                              gpu_name=gpu_name, gpu_vram_gb=gpu_vram_gb, load_error=load_error)
     if not model_loaded:
-        return HealthResponse(
-            status="loading",
-            model_loaded=False,
-            gpu_available=gpu_available,
-            gpu_name=gpu_name,
-            gpu_vram_gb=gpu_vram_gb,
-        )
-    return HealthResponse(
-        status="healthy",
-        model_loaded=True,
-        gpu_available=gpu_available,
-        gpu_name=gpu_name,
-        gpu_vram_gb=gpu_vram_gb,
-    )
+        return HealthResponse(status="loading", model_loaded=False, gpu_available=gpu_available,
+                              gpu_name=gpu_name, gpu_vram_gb=gpu_vram_gb)
+    return HealthResponse(status="healthy", model_loaded=True, gpu_available=gpu_available,
+                          gpu_name=gpu_name, gpu_vram_gb=gpu_vram_gb,
+                          active_streams=len(stream_sessions))
 
 
-# ── Lip sync (one-shot, file-based) ──────────────────────────────────────────
+# ── Lip sync (one-shot) ─────────────────────────────────────────────────────
 
 @app.post("/v1/lipsync")
 async def lipsync(
-    image: UploadFile = File(..., description="Imagem/vídeo de referência (PNG/JPG/MP4)"),
-    audio: UploadFile = File(..., description="Áudio WAV/MP3 que vai guiar os lábios"),
-    enhance: bool = Form(default=False, description="GFPGAN face enhancement"),
+    image: UploadFile = File(...),
+    audio: UploadFile = File(...),
+    enhance: bool = Form(default=False),
     fps: int = Form(default=25, ge=1, le=60),
     batch_size: int = Form(default=8, ge=1, le=32),
     extra_margin: int = Form(default=10, ge=0, le=40),
 ):
-    """Gera um MP4 com lip-sync. Bloqueia até terminar — pra streaming use WS."""
     touch_activity()
     if not model_loaded:
         raise HTTPException(status_code=503, detail=f"Modelo ainda carregando ou falhou: {load_error}")
@@ -169,7 +186,6 @@ async def lipsync(
 
         t0 = time.time()
         try:
-            # MuseTalkInference.generate retorna o path do MP4 gerado
             out_path = inference_engine.generate(  # type: ignore[union-attr]
                 audio_path=str(aud_path),
                 video_path=str(img_path),
@@ -190,10 +206,7 @@ async def lipsync(
         if not mp4_path.exists():
             raise HTTPException(status_code=500, detail=f"MP4 não foi gerado em {out_path}")
 
-        # Lê o arquivo na memória antes de deixar o TemporaryDirectory ser deletado.
-        # (StreamingResponse lazy não funciona aqui — o tmp é apagado ao sair do `with`.)
         data = mp4_path.read_bytes()
-
         headers = {
             "X-Elapsed-Seconds": f"{elapsed:.2f}",
             "Content-Disposition": f'attachment; filename="{out_name}.mp4"',
@@ -201,12 +214,285 @@ async def lipsync(
         return Response(content=data, media_type="video/mp4", headers=headers)
 
 
-# ── Demo HTML mínimo ─────────────────────────────────────────────────────────
+# ── Streaming helpers ───────────────────────────────────────────────────────
+
+def _preprocess_reference(img_bytes: bytes, bbox_shift: int, extra_margin: int,
+                          parsing_mode: str, left_cheek_width: int, right_cheek_width: int) -> Dict[str, Any]:
+    """Face detection + VAE encode do crop de referência. Idempotente,
+    chamado UMA vez por sessão — o resultado fica cacheado e é reusado
+    em todos os chunks de áudio."""
+    from musetalk.utils.preprocessing import get_landmark_and_bbox, coord_placeholder  # type: ignore
+    from musetalk.utils.face_parsing import FaceParsing  # type: ignore
+
+    # Salva temp pro reader do preprocessing aceitar path
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        f.write(img_bytes)
+        img_path = f.name
+    try:
+        coord_list, frame_list = get_landmark_and_bbox([img_path], bbox_shift)
+    finally:
+        try: os.unlink(img_path)
+        except OSError: pass
+
+    if not coord_list or coord_list[0] == coord_placeholder:
+        raise ValueError("Nenhum rosto detectado na imagem de referência")
+
+    bbox = coord_list[0]
+    frame = frame_list[0]
+    x1, y1, x2, y2 = bbox
+    y2 = min(y2 + extra_margin, frame.shape[0])
+    crop = frame[y1:y2, x1:x2]
+    crop_256 = cv2.resize(crop, (256, 256), interpolation=cv2.INTER_LANCZOS4)
+
+    latent = inference_engine.vae.get_latents_for_unet(crop_256)  # type: ignore[union-attr]
+    fp = FaceParsing(left_cheek_width=left_cheek_width, right_cheek_width=right_cheek_width)
+
+    return {
+        "frame": frame,
+        "coord": (x1, y1, x2, y2),
+        "latent": latent,
+        "fp": fp,
+        "extra_margin": extra_margin,
+        "parsing_mode": parsing_mode,
+        "last_use": time.time(),
+    }
+
+
+def _render_chunk_frames(session: Dict[str, Any], pcm_s16le_mono_16k: bytes, fps: int) -> list:
+    """Gera a lista de frames BGR pra um chunk de áudio (PCM s16le mono 16kHz).
+    Todo o pipeline exceto face detection (já cacheado)."""
+    from musetalk.utils.blending import get_image  # type: ignore
+
+    assert inference_engine is not None
+    engine = inference_engine
+
+    samples = np.frombuffer(pcm_s16le_mono_16k, dtype=np.int16).astype(np.float32) / 32768.0
+    librosa_length = len(samples)
+    if librosa_length == 0:
+        return []
+
+    # Whisper features (single 30s-padded segment)
+    feat = engine.audio_processor.feature_extractor(
+        samples, return_tensors="pt", sampling_rate=16000
+    ).input_features
+    feat = feat.to(engine.device).to(engine.weight_dtype)
+    audio_feats = engine.whisper.encoder(feat, output_hidden_states=True).hidden_states
+    audio_feats = torch.stack(audio_feats, dim=2)
+
+    import math
+    sr = 16000
+    audio_fps = 50
+    whisper_idx_multiplier = audio_fps / fps
+    num_frames = math.floor((librosa_length / sr) * fps)
+    actual_length = math.floor((librosa_length / sr) * audio_fps)
+    audio_feats = audio_feats[:, :actual_length, ...]
+    left_pad = 2
+    right_pad = 2
+    padding_nums = math.ceil(whisper_idx_multiplier)
+    audio_feats = torch.cat([
+        torch.zeros_like(audio_feats[:, :padding_nums * left_pad]),
+        audio_feats,
+        torch.zeros_like(audio_feats[:, :padding_nums * 3 * right_pad]),
+    ], 1)
+
+    whisper_chunks = []
+    feat_len_per_frame = 2 * (left_pad + right_pad + 1)
+    for frame_index in range(num_frames):
+        audio_index = math.floor(frame_index * whisper_idx_multiplier)
+        selected = audio_feats[:, audio_index:audio_index + feat_len_per_frame]
+        whisper_chunks.append(selected.squeeze(0))
+
+    if not whisper_chunks:
+        return []
+
+    # Batch pelos chunks (todos compartilham a mesma latent)
+    batch_size = 8
+    latent = session["latent"]
+    frame = session["frame"]
+    bbox = session["coord"]
+    fp = session["fp"]
+    parsing_mode = session["parsing_mode"]
+    x1, y1, x2, y2 = bbox
+
+    out_frames = []
+    with torch.no_grad():
+        for i in range(0, len(whisper_chunks), batch_size):
+            batch = whisper_chunks[i:i + batch_size]
+            whisper_batch = torch.stack(batch, dim=0).to(engine.device).to(engine.weight_dtype)
+            latent_batch = latent.expand(len(batch), -1, -1, -1).to(dtype=engine.weight_dtype)
+
+            audio_feature_batch = engine.pe(whisper_batch)
+            pred_latents = engine.unet.model(
+                latent_batch, engine.timesteps, encoder_hidden_states=audio_feature_batch
+            ).sample
+            recon = engine.vae.decode_latents(pred_latents)
+            for res_frame in recon:
+                face = res_frame.astype(np.uint8)
+                try:
+                    face_resized = cv2.resize(face, (x2 - x1, y2 - y1))
+                except Exception:
+                    continue
+                blended = get_image(frame.copy(), face_resized, [x1, y1, x2, y2],
+                                    mode=parsing_mode, fp=fp)
+                out_frames.append(blended)
+
+    return out_frames
+
+
+# ── WS /v1/stream ───────────────────────────────────────────────────────────
+
+@app.websocket("/v1/stream")
+async def stream_ws(ws: WebSocket):
+    """Protocolo:
+      client → server (JSON init):
+        {"op":"init","image":"<base64 png>","fps":25,"bbox_shift":0,
+         "extra_margin":10,"parsing_mode":"jaw",
+         "left_cheek_width":90,"right_cheek_width":90}
+      server → client:
+        {"status":"ready","session_id":"..."}
+      client → server (binário): PCM s16le mono 16kHz (chunks arbitrários)
+        ou JSON {"op":"flush"} / {"op":"close"}
+      server → client (binário): JPEG de cada frame gerado, prefixado com
+        JSON de metadata opcional.
+    """
+    await ws.accept()
+    touch_activity()
+
+    if not model_loaded:
+        await ws.send_json({"status": "error", "error": f"modelo não carregado: {load_error}"})
+        await ws.close()
+        return
+
+    # Etapa 1: receber init
+    try:
+        init = await ws.receive_json()
+    except WebSocketDisconnect:
+        return
+    except Exception as e:  # noqa: BLE001
+        await ws.send_json({"status": "error", "error": f"esperando init JSON: {e}"})
+        await ws.close()
+        return
+
+    if init.get("op") != "init" or not init.get("image"):
+        await ws.send_json({"status": "error", "error": "primeiro msg deve ser op=init com image base64"})
+        await ws.close()
+        return
+
+    try:
+        img_bytes = base64.b64decode(init["image"])
+    except Exception as e:  # noqa: BLE001
+        await ws.send_json({"status": "error", "error": f"image base64 inválida: {e}"})
+        await ws.close()
+        return
+
+    fps = int(init.get("fps", 25))
+    bbox_shift = int(init.get("bbox_shift", 0))
+    extra_margin = int(init.get("extra_margin", 10))
+    parsing_mode = init.get("parsing_mode", "jaw")
+    left_cheek = int(init.get("left_cheek_width", 90))
+    right_cheek = int(init.get("right_cheek_width", 90))
+
+    try:
+        session = await asyncio.get_event_loop().run_in_executor(
+            None, _preprocess_reference, img_bytes, bbox_shift, extra_margin,
+            parsing_mode, left_cheek, right_cheek,
+        )
+    except Exception as e:  # noqa: BLE001
+        tb = traceback.format_exc()
+        print(tb, flush=True, file=sys.stderr)
+        await ws.send_json({"status": "error", "error": f"preprocess falhou: {e}"})
+        await ws.close()
+        return
+
+    session_id = uuid.uuid4().hex
+    stream_sessions[session_id] = session
+    await ws.send_json({"status": "ready", "session_id": session_id, "fps": fps,
+                        "audio_format": "pcm_s16le_16k_mono"})
+
+    # Etapa 2: loop de áudio → frames
+    audio_buffer = bytearray()
+    # Chunk ms configurável: gera frames quando acumular esse tanto de áudio
+    chunk_ms = int(os.environ.get("MUSETALK_STREAM_CHUNK_MS", "1000"))
+    chunk_bytes_target = int((16000 * 2) * chunk_ms / 1000)
+
+    try:
+        while True:
+            msg = await ws.receive()
+            session["last_use"] = time.time()
+            if msg.get("type") == "websocket.disconnect":
+                break
+
+            # Binário → áudio
+            if msg.get("bytes") is not None:
+                audio_buffer.extend(msg["bytes"])
+                if len(audio_buffer) >= chunk_bytes_target:
+                    pcm = bytes(audio_buffer[:chunk_bytes_target])
+                    del audio_buffer[:chunk_bytes_target]
+                    t0 = time.time()
+                    frames = await asyncio.get_event_loop().run_in_executor(
+                        None, _render_chunk_frames, session, pcm, fps,
+                    )
+                    elapsed_ms = (time.time() - t0) * 1000
+                    for f in frames:
+                        ok, jpg = cv2.imencode(".jpg", f, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+                        if ok:
+                            await ws.send_bytes(jpg.tobytes())
+                    await ws.send_json({
+                        "event": "chunk_done",
+                        "frames": len(frames),
+                        "audio_ms": chunk_ms,
+                        "inference_ms": round(elapsed_ms, 1),
+                        "fps_effective": round(len(frames) / max(elapsed_ms / 1000, 1e-6), 1),
+                    })
+                continue
+
+            # Texto → JSON control
+            text = msg.get("text")
+            if not text:
+                continue
+            import json
+            try:
+                data = json.loads(text)
+            except Exception:
+                continue
+            op = data.get("op")
+            if op == "flush":
+                if len(audio_buffer) > 0:
+                    pcm = bytes(audio_buffer)
+                    audio_buffer.clear()
+                    frames = await asyncio.get_event_loop().run_in_executor(
+                        None, _render_chunk_frames, session, pcm, fps,
+                    )
+                    for f in frames:
+                        ok, jpg = cv2.imencode(".jpg", f, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+                        if ok:
+                            await ws.send_bytes(jpg.tobytes())
+                    await ws.send_json({"event": "flush_done", "frames": len(frames)})
+            elif op == "close":
+                break
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:  # noqa: BLE001
+        print(f"[musetalk] WS error: {e}", flush=True, file=sys.stderr)
+        try:
+            await ws.send_json({"status": "error", "error": str(e)})
+        except Exception:
+            pass
+    finally:
+        stream_sessions.pop(session_id, None)
+        try:
+            await ws.close()
+        except Exception:
+            pass
+
+
+# ── Demo HTML ────────────────────────────────────────────────────────────────
 
 @app.get("/v1/demo", response_class=HTMLResponse)
 async def demo():
     return """<!doctype html><html><body style="font-family:sans-serif;max-width:560px;margin:40px auto">
-<h2>MuseTalk demo</h2>
+<h2>MuseTalk — one-shot demo</h2>
+<p>Pro streaming em tempo real use WS <code>/v1/stream</code>.</p>
 <form id="f" enctype="multipart/form-data" method="post" action="/v1/lipsync">
   <label>Imagem/vídeo: <input type="file" name="image" accept="image/*,video/mp4" required></label><br><br>
   <label>Áudio: <input type="file" name="audio" accept="audio/*" required></label><br><br>
@@ -226,26 +512,6 @@ document.getElementById('f').addEventListener('submit', async (e) => {
   document.getElementById('v').src = URL.createObjectURL(blob);
 });
 </script></body></html>"""
-
-
-# ── WebSocket streaming (placeholder v2) ─────────────────────────────────────
-
-@app.websocket("/v1/stream")
-async def stream_ws(ws: WebSocket):
-    """Stub: recebe PCM 16kHz mono s16le em binário, emitirá frames JPEG.
-    A implementação completa depende de adaptar `MuseTalkInference` para
-    processar buffers de 1s em modo online. Por ora apenas fecha o socket
-    depois de aceitar — placeholder para iteração seguinte."""
-    await ws.accept()
-    touch_activity()
-    await ws.send_json({"status": "not_implemented_yet", "hint": "use POST /v1/lipsync"})
-    try:
-        while True:
-            msg = await ws.receive()
-            if msg.get("type") == "websocket.disconnect":
-                break
-    except WebSocketDisconnect:
-        pass
 
 
 # ── Entrypoint ───────────────────────────────────────────────────────────────

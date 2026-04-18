@@ -44,7 +44,34 @@ cold start.
 
 ## Test rápido
 
+### One-shot (file-based)
+
 ```bash
 curl -F "image=@portrait.png" -F "audio=@speech.wav" \
   -o out.mp4 http://localhost:8000/v1/lipsync
 ```
+
+### Streaming WS (real-time)
+
+Cliente Python incluso — mede FPS + RTF:
+
+```bash
+pip install websockets librosa
+python test_stream.py --server ws://localhost:8000 \
+  --image portrait.png --audio speech.wav --chunk-ms 1000
+```
+
+Protocolo do WS `/v1/stream`:
+
+1. Cliente envia JSON init:
+   ```json
+   {"op":"init","image":"<base64 png>","fps":25,"extra_margin":10,"parsing_mode":"jaw"}
+   ```
+2. Server responde `{"status":"ready","session_id":"..."}` (preprocessing da imagem bloqueia aqui, ~1-2s)
+3. Cliente envia PCM s16le mono 16kHz em binário (chunks arbitrários)
+4. Server acumula até `MUSETALK_STREAM_CHUNK_MS` (default 1000ms) e emite frames JPEG binários
+5. `{"op":"flush"}` — processa o residual; `{"op":"close"}` — fecha
+
+Otimização: face detection + VAE encode da referência rodam uma vez no
+init e ficam cacheados. Os chunks só rodam whisper → PE → UNet → VAE
+decode → blend — o hot path que o paper cita como 30fps+ em V100.
