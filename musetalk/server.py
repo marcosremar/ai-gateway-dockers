@@ -247,11 +247,20 @@ def _preprocess_reference(img_bytes: bytes, bbox_shift: int, extra_margin: int,
     latent = inference_engine.vae.get_latents_for_unet(crop_256)  # type: ignore[union-attr]
     fp = FaceParsing(left_cheek_width=left_cheek_width, right_cheek_width=right_cheek_width)
 
+    # Pré-computa mask + crop_box UMA vez aqui (caros: face parser + blur).
+    # Blending por frame vira só paste com mask_array cached.
+    from musetalk.utils.blending import get_image_prepare_material  # type: ignore
+    mask_array, crop_box = get_image_prepare_material(
+        frame, [x1, y1, x2, y2], fp=fp, mode=parsing_mode,
+    )
+
     return {
         "frame": frame,
         "coord": (x1, y1, x2, y2),
         "latent": latent,
         "fp": fp,
+        "mask_array": mask_array,
+        "crop_box": crop_box,
         "extra_margin": extra_margin,
         "parsing_mode": parsing_mode,
         "last_use": time.time(),
@@ -261,7 +270,7 @@ def _preprocess_reference(img_bytes: bytes, bbox_shift: int, extra_margin: int,
 def _render_chunk_frames(session: Dict[str, Any], pcm_s16le_mono_16k: bytes, fps: int) -> list:
     """Gera a lista de frames BGR pra um chunk de áudio (PCM s16le mono 16kHz).
     Todo o pipeline exceto face detection (já cacheado)."""
-    from musetalk.utils.blending import get_image  # type: ignore
+    from musetalk.utils.blending import get_image_blending  # type: ignore
 
     assert inference_engine is not None
     engine = inference_engine
@@ -295,12 +304,20 @@ def _render_chunk_frames(session: Dict[str, Any], pcm_s16le_mono_16k: bytes, fps
         torch.zeros_like(audio_feats[:, :padding_nums * 3 * right_pad]),
     ], 1)
 
-    whisper_chunks = []
+    from einops import rearrange
+    audio_prompts = []
     feat_len_per_frame = 2 * (left_pad + right_pad + 1)
     for frame_index in range(num_frames):
         audio_index = math.floor(frame_index * whisper_idx_multiplier)
-        selected = audio_feats[:, audio_index:audio_index + feat_len_per_frame]
-        whisper_chunks.append(selected.squeeze(0))
+        audio_clip = audio_feats[:, audio_index:audio_index + feat_len_per_frame]
+        if audio_clip.shape[1] != feat_len_per_frame:
+            continue
+        audio_prompts.append(audio_clip)
+    if not audio_prompts:
+        return []
+    audio_prompts = torch.cat(audio_prompts, dim=0)                # (T, 10, 5, 384)
+    audio_prompts = rearrange(audio_prompts, 'b c h w -> b (c h) w')  # (T, 50, 384)
+    whisper_chunks = [audio_prompts[i] for i in range(audio_prompts.shape[0])]
 
     if not whisper_chunks:
         return []
@@ -310,8 +327,8 @@ def _render_chunk_frames(session: Dict[str, Any], pcm_s16le_mono_16k: bytes, fps
     latent = session["latent"]
     frame = session["frame"]
     bbox = session["coord"]
-    fp = session["fp"]
-    parsing_mode = session["parsing_mode"]
+    mask_array = session["mask_array"]
+    crop_box = session["crop_box"]
     x1, y1, x2, y2 = bbox
 
     out_frames = []
@@ -332,8 +349,9 @@ def _render_chunk_frames(session: Dict[str, Any], pcm_s16le_mono_16k: bytes, fps
                     face_resized = cv2.resize(face, (x2 - x1, y2 - y1))
                 except Exception:
                     continue
-                blended = get_image(frame.copy(), face_resized, [x1, y1, x2, y2],
-                                    mode=parsing_mode, fp=fp)
+                blended = get_image_blending(
+                    frame, face_resized, [x1, y1, x2, y2], mask_array, crop_box,
+                )
                 out_frames.append(blended)
 
     return out_frames
@@ -473,9 +491,10 @@ async def stream_ws(ws: WebSocket):
     except WebSocketDisconnect:
         pass
     except Exception as e:  # noqa: BLE001
-        print(f"[musetalk] WS error: {e}", flush=True, file=sys.stderr)
+        tb = traceback.format_exc()
+        print(f"[musetalk] WS error: {e}\n{tb}", flush=True, file=sys.stderr)
         try:
-            await ws.send_json({"status": "error", "error": str(e)})
+            await ws.send_json({"status": "error", "error": str(e), "traceback": tb[-2000:]})
         except Exception:
             pass
     finally:
