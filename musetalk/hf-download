@@ -1,0 +1,156 @@
+#!/usr/bin/env bash
+# ── hf-download — HuggingFace model downloader with smart method selection ──
+#
+# Drop-in replacement for single-file `hf_hub_download()` calls.
+#
+# Method priority (validated 2026-04-07, 3 runs on Vast.ai RTX 4090 64GB):
+#   1. huggingface_hub SDK with hf-xet HIGH_PERFORMANCE + FIXED_CONCURRENCY=50
+#      — 394 MB/s avg (+24% vs legacy hf_transfer, 11% variance spread)
+#      — gives proper cache integration, resume, hash verification
+#   2. Fallback to aria2c with x8 connections
+#      — only helps on bandwidth-limited (home/local) networks
+#      — on datacenter hosts this is SLOWER than single-stream curl
+#        (bench: curl=359 MB/s, aria2c_x16=230 MB/s on RTX 4090)
+#   3. Final fallback to curl single-stream
+#
+# Usage:
+#   hf-download <repo> <file> [dest] [revision]
+#
+# Examples:
+#   hf-download bullerwins/translategemma-4b-it-GGUF translategemma-4b-it-Q8_0.gguf
+#   hf-download Systran/faster-whisper-large-v3-turbo model.bin /app/whisper/model.bin
+#
+# Environment:
+#   HF_HOME                          — HuggingFace cache root (default: /app/.cache/huggingface)
+#   HF_TOKEN                         — Auth token for gated models
+#   HF_CONNECTIONS                   — aria2c connections (default: 8)
+#   HF_FORCE_ARIA2                   — Set to 1 to force aria2c (skip HF SDK)
+#   HF_XET_HIGH_PERFORMANCE          — Passed through (default: 1, requires ≥64GB RAM)
+#   HF_XET_FIXED_DOWNLOAD_CONCURRENCY — Passed through (default: 50)
+# ─────────────────────────────────────────────────────────────────────────────
+
+set -euo pipefail
+
+REPO="${1:-}"
+FILE="${2:-}"
+DEST="${3:-}"
+REVISION="${4:-main}"
+CONNECTIONS="${HF_CONNECTIONS:-8}"
+HF_HOME="${HF_HOME:-/app/.cache/huggingface}"
+FORCE_ARIA2="${HF_FORCE_ARIA2:-0}"
+
+if [ -z "$REPO" ] || [ -z "$FILE" ]; then
+    echo "Usage: hf-download <repo> <file> [dest] [revision]" >&2
+    exit 1
+fi
+
+if [ -z "$DEST" ]; then
+    SANITIZED=$(echo "$REPO" | tr '/' '_')
+    DEST="${HF_HOME}/hub/${SANITIZED}/${FILE}"
+fi
+
+mkdir -p "$(dirname "$DEST")"
+
+if [ -f "$DEST" ] && [ -s "$DEST" ]; then
+    echo "[hf-download] Already cached: $DEST"
+    exit 0
+fi
+
+URL="https://huggingface.co/${REPO}/resolve/${REVISION}/${FILE}"
+
+# ── Method 1: huggingface_hub SDK with hf-xet HP+FIXED=50 (PREFERRED) ───────
+# Validated on Vast.ai RTX 4090 (3 runs): 394 MB/s avg, +24% vs legacy,
+# 11% variance spread. Uses the new Xet storage backend.
+
+if [ "$FORCE_ARIA2" != "1" ] && command -v python3 &>/dev/null; then
+    echo "[hf-download] Python SDK (hf-xet HP+FIXED=50): ${REPO}/${FILE}"
+    if python3 - <<PYEOF
+import os, sys, shutil
+# hf-xet tuning — validated on Vast.ai RTX 4090 (2026-04-07)
+os.environ.setdefault("HF_XET_HIGH_PERFORMANCE", "1")
+os.environ.setdefault("HF_XET_FIXED_DOWNLOAD_CONCURRENCY", "50")
+os.environ.setdefault("HF_HOME", "$HF_HOME")
+try:
+    from huggingface_hub import hf_hub_download
+    path = hf_hub_download(
+        "$REPO",
+        "$FILE",
+        revision="$REVISION",
+        token=os.environ.get("HF_TOKEN") or None,
+    )
+    dest = "$DEST"
+    os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
+    if os.path.realpath(path) != os.path.realpath(dest):
+        shutil.copy2(path, dest)
+    print(f"[hf-download] downloaded via hf_hub_download -> {dest}")
+except Exception as e:
+    print(f"[hf-download] hf_hub_download error: {e}", file=sys.stderr)
+    sys.exit(1)
+PYEOF
+    then
+        if [ -s "$DEST" ]; then
+            size=$(stat -c%s "$DEST" 2>/dev/null || stat -f%z "$DEST" 2>/dev/null || echo 0)
+            size_mb=$((size / 1024 / 1024))
+            echo "[hf-download] ✓ Downloaded ${size_mb} MB via HF Hub SDK (xet)"
+            exit 0
+        fi
+    fi
+    echo "[hf-download] HF Hub SDK failed, trying aria2c..."
+fi
+
+# ── Method 2: aria2c multi-connection (fallback) ────────────────────────────
+# Only helps on bandwidth-limited networks (home/local).
+
+if command -v aria2c &>/dev/null; then
+    echo "[hf-download] aria2c x${CONNECTIONS} (fallback): ${REPO}/${FILE}"
+    ARIA_ARGS=(
+        -x "$CONNECTIONS" -s "$CONNECTIONS" -k 10M
+        --file-allocation=none
+        --max-connection-per-server="$CONNECTIONS"
+        --min-split-size=5M
+        --connect-timeout=10
+        --timeout=60
+        --max-tries=3
+        --retry-wait=2
+        --auto-file-renaming=false
+        --allow-overwrite=true
+        -d "$(dirname "$DEST")"
+        -o "$(basename "$DEST")"
+    )
+    if [ -n "${HF_TOKEN:-}" ]; then
+        set -- "--header=Authorization: Bearer ${HF_TOKEN}" "${ARIA_ARGS[@]}" "$URL"
+    else
+        set -- "${ARIA_ARGS[@]}" "$URL"
+    fi
+
+    if aria2c "$@" 2>&1 | tail -5; then
+        if [ -s "$DEST" ]; then
+            size=$(stat -c%s "$DEST" 2>/dev/null || stat -f%z "$DEST" 2>/dev/null || echo 0)
+            size_mb=$((size / 1024 / 1024))
+            echo "[hf-download] ✓ Downloaded ${size_mb} MB via aria2c"
+            exit 0
+        fi
+    fi
+    echo "[hf-download] aria2c failed, trying curl..."
+fi
+
+# ── Method 3: curl single-stream (final fallback) ───────────────────────────
+
+if command -v curl &>/dev/null; then
+    echo "[hf-download] curl (final fallback): ${REPO}/${FILE}"
+    CURL_ARGS=(-L -o "$DEST" --retry 3 --retry-delay 2 --connect-timeout 10)
+    if [ -n "${HF_TOKEN:-}" ]; then
+        CURL_ARGS+=(-H "Authorization: Bearer ${HF_TOKEN}")
+    fi
+    if curl "${CURL_ARGS[@]}" "$URL"; then
+        if [ -s "$DEST" ]; then
+            size=$(stat -c%s "$DEST" 2>/dev/null || stat -f%z "$DEST" 2>/dev/null || echo 0)
+            size_mb=$((size / 1024 / 1024))
+            echo "[hf-download] ✓ Downloaded ${size_mb} MB via curl"
+            exit 0
+        fi
+    fi
+fi
+
+echo "[hf-download] ERROR: all download methods failed for $REPO/$FILE" >&2
+exit 1
