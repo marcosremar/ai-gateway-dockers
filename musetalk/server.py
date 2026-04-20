@@ -394,6 +394,79 @@ def _render_chunk_frames(session: Dict[str, Any], pcm_s16le_mono_16k: bytes, fps
     return out_frames
 
 
+# ── Mouth refinement (single-frame, hybrid concat use-case) ─────────────────
+
+@app.post("/v1/refine_mouth")
+async def refine_mouth(
+    image: UploadFile = File(...),
+    audio: UploadFile = File(...),
+    extra_margin: int = Form(default=10),
+    parsing_mode: str = Form(default="jaw"),
+    bbox_shift: int = Form(default=0),
+    left_cheek_width: int = Form(default=90),
+    right_cheek_width: int = Form(default=90),
+):
+    """Refina SÓ a região da boca de UMA imagem usando 1 chunk curto de áudio.
+
+    Caso de uso: pipeline concatenativo escolheu um frame, mas SyncNet detectou
+    que a boca não casa com o áudio nessa janela. Esse endpoint regenera só a
+    boca daquele frame específico (resto fica intocado).
+
+    Custo: ~8-12% do /v1/lipsync (apenas 1 frame, sem video assembly).
+    """
+    global _active_requests
+    touch_activity()
+    _touch_activity()
+    _active_requests += 1
+    if not model_loaded:
+        _active_requests = max(0, _active_requests - 1)
+        raise HTTPException(status_code=503, detail=f"Model not ready: {load_error}")
+
+    try:
+        img_bytes = await image.read()
+        audio_bytes = await audio.read()
+
+        # Prepara sessão (face detect + VAE latent + mask) a partir da imagem
+        session = _preprocess_reference(
+            img_bytes=img_bytes, bbox_shift=bbox_shift,
+            extra_margin=extra_margin, parsing_mode=parsing_mode,
+            left_cheek_width=left_cheek_width, right_cheek_width=right_cheek_width,
+        )
+
+        # Carrega áudio → PCM s16le mono 16kHz (formato esperado por _render_chunk_frames)
+        import soundfile as sf
+        import io as _io
+        try:
+            data, sr = sf.read(_io.BytesIO(audio_bytes), dtype="int16")
+        except Exception as e:
+            raise HTTPException(400, f"audio decode failed: {e}")
+        if data.ndim > 1:
+            data = data.mean(axis=1).astype(np.int16)
+        if sr != 16000:
+            try:
+                import librosa
+                f = data.astype(np.float32) / 32768.0
+                f = librosa.resample(f, orig_sr=sr, target_sr=16000)
+                data = (f * 32768).clip(-32768, 32767).astype(np.int16)
+            except Exception as e:
+                raise HTTPException(400, f"resample failed: {e}")
+
+        frames = _render_chunk_frames(session, data.tobytes(), fps=25)
+        if not frames:
+            raise HTTPException(500, "no frame generated (audio too short?)")
+
+        # Pega o frame central (boca melhor alinhada com o centro do chunk de áudio)
+        out = frames[len(frames) // 2]
+        ok, jpeg = cv2.imencode(".jpg", out, [cv2.IMWRITE_JPEG_QUALITY, 92])
+        if not ok:
+            raise HTTPException(500, "jpeg encode failed")
+        return Response(content=jpeg.tobytes(), media_type="image/jpeg",
+                        headers={"X-Frames-Generated": str(len(frames))})
+    finally:
+        _active_requests = max(0, _active_requests - 1)
+        _touch_activity()
+
+
 # ── WS /v1/stream ───────────────────────────────────────────────────────────
 
 @app.websocket("/v1/stream")
