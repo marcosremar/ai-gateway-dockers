@@ -137,9 +137,25 @@ class HealthResponse(BaseModel):
     gpu_vram_gb: Optional[float] = None
     load_error: Optional[str] = None
     active_streams: int = 0
+    active_requests: int = 0
+    # Epoch seconds da última request servida (one-shot ou streaming chunk).
+    # O ai-gateway usa esse campo pra resetar o timer de idle e não matar
+    # pods que estão sendo usados via bypass do gateway.
+    last_request_at: float = 0.0
     # Campos exigidos pelo readiness check do ai-gateway. MuseTalk não tem
     # STT/LLM/TTS, então mapeamos pra "loaded" assim que o modelo carregar.
     services: Optional[Dict[str, str]] = None
+
+
+# Tracking de atividade (atualizado por todos os handlers que de fato usam GPU)
+import time as _time
+_last_request_at: float = 0.0
+_active_requests: int = 0
+
+
+def _touch_activity():
+    global _last_request_at
+    _last_request_at = _time.time()
 
 
 def _services_status() -> Dict[str, str]:
@@ -166,6 +182,8 @@ async def health():
     return HealthResponse(status="healthy", model_loaded=True, gpu_available=gpu_available,
                           gpu_name=gpu_name, gpu_vram_gb=gpu_vram_gb,
                           active_streams=len(stream_sessions),
+                          active_requests=_active_requests,
+                          last_request_at=_last_request_at,
                           services=_services_status())
 
 
@@ -180,11 +198,16 @@ async def lipsync(
     batch_size: int = Form(default=8, ge=1, le=32),
     extra_margin: int = Form(default=10, ge=0, le=40),
 ):
+    global _active_requests
     touch_activity()
+    _touch_activity()
+    _active_requests += 1
     if not model_loaded:
+        _active_requests = max(0, _active_requests - 1)
         raise HTTPException(status_code=503, detail=f"Modelo ainda carregando ou falhou: {load_error}")
 
-    with tempfile.TemporaryDirectory(prefix="musetalk_") as tmp:
+    try:
+      with tempfile.TemporaryDirectory(prefix="musetalk_") as tmp:
         tmp_path = Path(tmp)
         img_path = tmp_path / (image.filename or "reference.png")
         aud_path = tmp_path / (audio.filename or "driver.wav")
@@ -223,6 +246,9 @@ async def lipsync(
             "Content-Disposition": f'attachment; filename="{out_name}.mp4"',
         }
         return Response(content=data, media_type="video/mp4", headers=headers)
+    finally:
+      _active_requests = max(0, _active_requests - 1)
+      _touch_activity()
 
 
 # ── Streaming helpers ───────────────────────────────────────────────────────
