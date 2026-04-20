@@ -19,9 +19,7 @@
 #     marcosremar/musetalk:latest
 # ─────────────────────────────────────────────────────────────────────────────
 
-# CUDA 12.4 + cuDNN9 — requerido pra Blackwell (RTX 5090, sm_120) e pra
-# torch 2.6 + mmcv 2.2. Mantém compatibilidade com Ampere (A100) e Ada (4090).
-ARG BASE_IMAGE=nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+ARG BASE_IMAGE=nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04
 FROM ${BASE_IMAGE}
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -43,10 +41,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 
-# NOTE: setuptools <80 required — mmcv build hooks import pkg_resources,
-# which setuptools 80 removed by default.
-RUN pip3 install --no-cache-dir --upgrade pip wheel && \
-    pip3 install --no-cache-dir "setuptools<80"
+RUN pip3 install --no-cache-dir --upgrade pip setuptools wheel
 
 # ── hf-download helper (multi-conn) ──────────────────────────────────────────
 COPY hf-download /usr/local/bin/hf-download
@@ -54,24 +49,19 @@ RUN chmod +x /usr/local/bin/hf-download
 
 WORKDIR /app
 
-# ── PyTorch CUDA 12.4 (suporta Blackwell sm_120 / RTX 5090) ──────────────────
-# torch 2.4.0 tem wheel pré-compilada de mmcv 2.2 em cu124 (versões mais
-# novas exigem compilação from-source). Mantém compatibilidade com Ada/Ampere.
+# ── PyTorch CUDA 11.8 (compatível com mmcv/mmdet 2.0.1 via openmim) ──────────
 RUN pip3 install --no-cache-dir \
-    torch==2.4.0 \
-    torchvision==0.19.0 \
-    torchaudio==2.4.0 \
-    --index-url https://download.pytorch.org/whl/cu124
+    torch==2.0.1+cu118 \
+    torchvision==0.15.2+cu118 \
+    torchaudio==2.0.2+cu118 \
+    --index-url https://download.pytorch.org/whl/cu118
 
 # ── MMPose stack (detecção de landmarks faciais) ─────────────────────────────
-# Usa wheel pré-compilada do OpenMMLab (cu124/torch2.4) pra evitar compilação
-# do zero (que depende de pkg_resources e costuma falhar com setuptools novo).
 RUN pip3 install --no-cache-dir -U openmim && \
     mim install mmengine && \
-    pip3 install --no-cache-dir "mmcv==2.2.0" \
-        -f "https://download.openmmlab.com/mmcv/dist/cu124/torch2.4/index.html" && \
-    mim install "mmdet==3.3.0" && \
-    pip3 install --no-cache-dir --no-build-isolation "mmpose==1.3.2"
+    mim install "mmcv==2.0.1" && \
+    mim install "mmdet==3.1.0" && \
+    pip3 install --no-cache-dir --no-build-isolation "mmpose==1.1.0"
 
 # ── MuseTalk + infra deps ────────────────────────────────────────────────────
 RUN pip3 install --no-cache-dir \
