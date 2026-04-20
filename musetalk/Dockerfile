@@ -19,7 +19,9 @@
 #     marcosremar/musetalk:latest
 # ─────────────────────────────────────────────────────────────────────────────
 
-ARG BASE_IMAGE=nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04
+# CUDA 12.4 + cuDNN9 — requerido pra Blackwell (RTX 5090, sm_120) e pra
+# torch 2.6 + mmcv 2.2. Mantém compatibilidade com Ampere (A100) e Ada (4090).
+ARG BASE_IMAGE=nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
 FROM ${BASE_IMAGE}
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -49,19 +51,21 @@ RUN chmod +x /usr/local/bin/hf-download
 
 WORKDIR /app
 
-# ── PyTorch CUDA 11.8 (compatível com mmcv/mmdet 2.0.1 via openmim) ──────────
+# ── PyTorch CUDA 12.4 (suporta Blackwell sm_120 / RTX 5090) ──────────────────
 RUN pip3 install --no-cache-dir \
-    torch==2.0.1+cu118 \
-    torchvision==0.15.2+cu118 \
-    torchaudio==2.0.2+cu118 \
-    --index-url https://download.pytorch.org/whl/cu118
+    torch==2.6.0 \
+    torchvision==0.21.0 \
+    torchaudio==2.6.0 \
+    --index-url https://download.pytorch.org/whl/cu124
 
 # ── MMPose stack (detecção de landmarks faciais) ─────────────────────────────
+# mmcv 2.2 é a primeira versão com wheels pra torch 2.4+; usamos 2.2.0 +
+# mmdet 3.3 + mmpose 1.3 (combinação testada).
 RUN pip3 install --no-cache-dir -U openmim && \
     mim install mmengine && \
-    mim install "mmcv==2.0.1" && \
-    mim install "mmdet==3.1.0" && \
-    pip3 install --no-cache-dir --no-build-isolation "mmpose==1.1.0"
+    mim install "mmcv==2.2.0" && \
+    mim install "mmdet==3.3.0" && \
+    pip3 install --no-cache-dir --no-build-isolation "mmpose==1.3.2"
 
 # ── MuseTalk + infra deps ────────────────────────────────────────────────────
 RUN pip3 install --no-cache-dir \
