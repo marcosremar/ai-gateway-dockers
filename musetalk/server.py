@@ -76,6 +76,17 @@ def _load_inference_engine():
         t0 = time.time()
         from api.inference_service import MuseTalkInference  # type: ignore
 
+        # Determinismo: chamadas idênticas devem produzir pixels idênticos.
+        # Sem isso, cuDNN nondeterministic gera bocas ligeiramente diferentes
+        # a cada call, contribuindo pra "tremor" em pipelines híbridos.
+        try:
+            torch.manual_seed(42)
+            torch.cuda.manual_seed_all(42)
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
+        except Exception:
+            pass
+
         engine = MuseTalkInference(use_float16=True)
         engine.load_models()
         inference_engine = engine
