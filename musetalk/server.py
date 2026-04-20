@@ -467,6 +467,87 @@ async def refine_mouth(
         _touch_activity()
 
 
+# ── Mouth refinement BATCH (block of frames, single MuseTalk call) ─────────
+
+@app.post("/v1/refine_mouth_block")
+async def refine_mouth_block(
+    image: UploadFile = File(...),
+    audio: UploadFile = File(...),
+    extra_margin: int = Form(default=10),
+    parsing_mode: str = Form(default="jaw"),
+    bbox_shift: int = Form(default=0),
+    left_cheek_width: int = Form(default=90),
+    right_cheek_width: int = Form(default=90),
+    fps: int = Form(default=25, ge=10, le=60),
+):
+    """Refina um BLOCO de frames usando 1 template + áudio do bloco inteiro.
+
+    Diferença pro /v1/refine_mouth: aqui retornamos TODOS os N frames gerados
+    pelo MuseTalk como um TAR de JPEGs. O cliente concatenativo agrupa frames
+    contíguos com sync ruim e refina em batch — produz boca temporalmente
+    consistente (sem o "tremor" do refinement frame-a-frame).
+
+    Input: 1 imagem template + N frames de áudio (N = duração * fps).
+    Output: tar com N JPEGs nomeados {0000.jpg, 0001.jpg, ...}.
+    """
+    global _active_requests
+    touch_activity(); _touch_activity()
+    _active_requests += 1
+    if not model_loaded:
+        _active_requests = max(0, _active_requests - 1)
+        raise HTTPException(503, f"Model not ready: {load_error}")
+
+    try:
+        img_bytes = await image.read()
+        audio_bytes = await audio.read()
+
+        session = _preprocess_reference(
+            img_bytes=img_bytes, bbox_shift=bbox_shift,
+            extra_margin=extra_margin, parsing_mode=parsing_mode,
+            left_cheek_width=left_cheek_width, right_cheek_width=right_cheek_width,
+        )
+
+        import soundfile as sf
+        import io as _io
+        try:
+            data, sr = sf.read(_io.BytesIO(audio_bytes), dtype="int16")
+        except Exception as e:
+            raise HTTPException(400, f"audio decode failed: {e}")
+        if data.ndim > 1:
+            data = data.mean(axis=1).astype(np.int16)
+        if sr != 16000:
+            try:
+                import librosa
+                f = data.astype(np.float32) / 32768.0
+                f = librosa.resample(f, orig_sr=sr, target_sr=16000)
+                data = (f * 32768).clip(-32768, 32767).astype(np.int16)
+            except Exception as e:
+                raise HTTPException(400, f"resample failed: {e}")
+
+        frames = _render_chunk_frames(session, data.tobytes(), fps=fps)
+        if not frames:
+            raise HTTPException(500, "no frames generated")
+
+        # Empacota como TAR de JPEGs
+        import tarfile
+        buf = _io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as tar:
+            for i, f in enumerate(frames):
+                ok, jpeg = cv2.imencode(".jpg", f, [cv2.IMWRITE_JPEG_QUALITY, 92])
+                if not ok:
+                    continue
+                data_b = jpeg.tobytes()
+                ti = tarfile.TarInfo(f"{i:04d}.jpg")
+                ti.size = len(data_b)
+                tar.addfile(ti, _io.BytesIO(data_b))
+        return Response(content=buf.getvalue(),
+                        media_type="application/x-tar",
+                        headers={"X-Frames-Generated": str(len(frames))})
+    finally:
+        _active_requests = max(0, _active_requests - 1)
+        _touch_activity()
+
+
 # ── WS /v1/stream ───────────────────────────────────────────────────────────
 
 @app.websocket("/v1/stream")
