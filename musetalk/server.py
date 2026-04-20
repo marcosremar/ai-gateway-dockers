@@ -137,6 +137,14 @@ class HealthResponse(BaseModel):
     gpu_vram_gb: Optional[float] = None
     load_error: Optional[str] = None
     active_streams: int = 0
+    # Campos exigidos pelo readiness check do ai-gateway. MuseTalk não tem
+    # STT/LLM/TTS, então mapeamos pra "loaded" assim que o modelo carregar.
+    services: Optional[Dict[str, str]] = None
+
+
+def _services_status() -> Dict[str, str]:
+    s = "loaded" if model_loaded else "loading"
+    return {"whisper": s, "llama_cpp": s, "tts": s}
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -149,13 +157,16 @@ async def health():
 
     if load_error:
         return HealthResponse(status="error", model_loaded=False, gpu_available=gpu_available,
-                              gpu_name=gpu_name, gpu_vram_gb=gpu_vram_gb, load_error=load_error)
+                              gpu_name=gpu_name, gpu_vram_gb=gpu_vram_gb, load_error=load_error,
+                              services=_services_status())
     if not model_loaded:
         return HealthResponse(status="loading", model_loaded=False, gpu_available=gpu_available,
-                              gpu_name=gpu_name, gpu_vram_gb=gpu_vram_gb)
+                              gpu_name=gpu_name, gpu_vram_gb=gpu_vram_gb,
+                              services=_services_status())
     return HealthResponse(status="healthy", model_loaded=True, gpu_available=gpu_available,
                           gpu_name=gpu_name, gpu_vram_gb=gpu_vram_gb,
-                          active_streams=len(stream_sessions))
+                          active_streams=len(stream_sessions),
+                          services=_services_status())
 
 
 # ── Lip sync (one-shot) ─────────────────────────────────────────────────────
