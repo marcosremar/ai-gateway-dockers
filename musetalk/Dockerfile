@@ -43,7 +43,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 
-RUN pip3 install --no-cache-dir --upgrade pip setuptools wheel
+# NOTE: setuptools <80 required — mmcv build hooks import pkg_resources,
+# which setuptools 80 removed by default.
+RUN pip3 install --no-cache-dir --upgrade pip wheel && \
+    pip3 install --no-cache-dir "setuptools<80"
 
 # ── hf-download helper (multi-conn) ──────────────────────────────────────────
 COPY hf-download /usr/local/bin/hf-download
@@ -52,18 +55,21 @@ RUN chmod +x /usr/local/bin/hf-download
 WORKDIR /app
 
 # ── PyTorch CUDA 12.4 (suporta Blackwell sm_120 / RTX 5090) ──────────────────
+# torch 2.4.0 tem wheel pré-compilada de mmcv 2.2 em cu124 (versões mais
+# novas exigem compilação from-source). Mantém compatibilidade com Ada/Ampere.
 RUN pip3 install --no-cache-dir \
-    torch==2.6.0 \
-    torchvision==0.21.0 \
-    torchaudio==2.6.0 \
+    torch==2.4.0 \
+    torchvision==0.19.0 \
+    torchaudio==2.4.0 \
     --index-url https://download.pytorch.org/whl/cu124
 
 # ── MMPose stack (detecção de landmarks faciais) ─────────────────────────────
-# mmcv 2.2 é a primeira versão com wheels pra torch 2.4+; usamos 2.2.0 +
-# mmdet 3.3 + mmpose 1.3 (combinação testada).
+# Usa wheel pré-compilada do OpenMMLab (cu124/torch2.4) pra evitar compilação
+# do zero (que depende de pkg_resources e costuma falhar com setuptools novo).
 RUN pip3 install --no-cache-dir -U openmim && \
     mim install mmengine && \
-    mim install "mmcv==2.2.0" && \
+    pip3 install --no-cache-dir "mmcv==2.2.0" \
+        -f "https://download.openmmlab.com/mmcv/dist/cu124/torch2.4/index.html" && \
     mim install "mmdet==3.3.0" && \
     pip3 install --no-cache-dir --no-build-isolation "mmpose==1.3.2"
 
