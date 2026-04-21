@@ -26,7 +26,10 @@ fi
 
 ENDPOINT="${B2_ENDPOINT:-https://s3.us-west-004.backblazeb2.com}"
 REGION="${B2_REGION:-us-west-004}"
-PREFIX="${B2_PREFIX:-workspaces/$(hostname)}"
+# Pod ID identifica cada máquina — sub-diretório próprio dentro do bucket.
+# Prioridade: B2_PREFIX explícito > Vast.ai container hostname > generic hostname.
+DEFAULT_PREFIX="pods/${VAST_CONTAINERLABEL:-${HOSTNAME:-unknown}}"
+PREFIX="${B2_PREFIX:-$DEFAULT_PREFIX}"
 SRC="${BACKUP_PATH:-/workspace}"
 
 if [ ! -d "$SRC" ]; then
