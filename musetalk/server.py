@@ -510,6 +510,41 @@ async def refine_mouth(
         _touch_activity()
 
 
+# ── Workspace backup (manual trigger; auto-backup roda via start.sh) ───────
+
+@app.post("/v1/backup_now")
+async def backup_now():
+    """Trigger imediato do /app/backup_workspace.sh.
+
+    Útil pra:
+    - Forçar backup antes de pausar/encerrar pod
+    - Testar credenciais B2 sem esperar 24h
+    - Pipelines longos podem chamar antes de terminar pra garantir persistência
+
+    Retorna: {ok, exit_code, log_tail (últimas 30 linhas)}.
+    Não bloqueia: roda como subprocess e devolve resultado.
+    """
+    import subprocess as _sp
+    log_path = "/var/log/workspace_backup.log"
+    try:
+        r = _sp.run(["/app/backup_workspace.sh"],
+                    capture_output=True, text=True, timeout=1800)
+        log_tail = ""
+        try:
+            with open(log_path) as f:
+                log_tail = "\n".join(f.read().splitlines()[-30:])
+        except Exception:
+            pass
+        return {"ok": r.returncode == 0, "exit_code": r.returncode,
+                "stdout_tail": (r.stdout or "")[-2000:],
+                "stderr_tail": (r.stderr or "")[-2000:],
+                "log_tail": log_tail}
+    except _sp.TimeoutExpired:
+        raise HTTPException(504, "backup script timed out (>30 min)")
+    except FileNotFoundError:
+        raise HTTPException(500, "/app/backup_workspace.sh not found")
+
+
 # ── Mouth refinement BATCH (block of frames, single MuseTalk call) ─────────
 
 @app.post("/v1/refine_mouth_block")
