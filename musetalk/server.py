@@ -153,9 +153,37 @@ class HealthResponse(BaseModel):
     # O ai-gateway usa esse campo pra resetar o timer de idle e não matar
     # pods que estão sendo usados via bypass do gateway.
     last_request_at: float = 0.0
+    # Utilização REAL da GPU (%) — lida via nvidia-smi a cada /health.
+    # Crítico pra ai-gateway: se gpu_util > 5%, há processamento ativo
+    # mesmo que active_requests == 0 (ex: workload externo, batch interno),
+    # e o pod NÃO deve ser auto-paused.
+    gpu_util: float = 0.0
+    gpu_mem_used_gb: float = 0.0
     # Campos exigidos pelo readiness check do ai-gateway. MuseTalk não tem
     # STT/LLM/TTS, então mapeamos pra "loaded" assim que o modelo carregar.
     services: Optional[Dict[str, str]] = None
+
+
+def _read_gpu_util() -> tuple[float, float]:
+    """Retorna (utilization_percent, mem_used_gb) lendo nvidia-smi.
+
+    Falha silenciosa se nvidia-smi não disponível — retorna (0,0).
+    """
+    try:
+        import subprocess as _sp
+        r = _sp.run(
+            ["nvidia-smi",
+             "--query-gpu=utilization.gpu,memory.used",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=2,
+        )
+        if r.returncode != 0:
+            return 0.0, 0.0
+        line = r.stdout.strip().split("\n")[0]
+        util_s, mem_s = [x.strip() for x in line.split(",")]
+        return float(util_s), float(mem_s) / 1024.0
+    except Exception:
+        return 0.0, 0.0
 
 
 # Tracking de atividade (atualizado por todos os handlers que de fato usam GPU)
@@ -182,19 +210,23 @@ async def health():
     if gpu_available:
         gpu_vram_gb = round(torch.cuda.get_device_properties(0).total_memory / (1024 ** 3), 1)
 
+    gpu_util, gpu_mem_used_gb = _read_gpu_util()
     if load_error:
         return HealthResponse(status="error", model_loaded=False, gpu_available=gpu_available,
                               gpu_name=gpu_name, gpu_vram_gb=gpu_vram_gb, load_error=load_error,
+                              gpu_util=gpu_util, gpu_mem_used_gb=gpu_mem_used_gb,
                               services=_services_status())
     if not model_loaded:
         return HealthResponse(status="loading", model_loaded=False, gpu_available=gpu_available,
                               gpu_name=gpu_name, gpu_vram_gb=gpu_vram_gb,
+                              gpu_util=gpu_util, gpu_mem_used_gb=gpu_mem_used_gb,
                               services=_services_status())
     return HealthResponse(status="healthy", model_loaded=True, gpu_available=gpu_available,
                           gpu_name=gpu_name, gpu_vram_gb=gpu_vram_gb,
                           active_streams=len(stream_sessions),
                           active_requests=_active_requests,
                           last_request_at=_last_request_at,
+                          gpu_util=gpu_util, gpu_mem_used_gb=gpu_mem_used_gb,
                           services=_services_status())
 
 
