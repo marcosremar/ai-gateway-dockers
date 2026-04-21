@@ -371,25 +371,40 @@ def _preprocess_reference(ref_bytes: bytes, bbox_shift: int, extra_margin: int,
 
     fp = FaceParsing(left_cheek_width=left_cheek_width, right_cheek_width=right_cheek_width)
 
+    # Para vídeo-ref: estabiliza bbox usando a MEDIANA das detecções por frame.
+    # Motivo: cycling de bbox por frame (cada um com posição ligeiramente diferente)
+    # causa "tremor" visível — pasta do face-region salta frame-a-frame. Usando
+    # uma bbox única pra todos os frames, só os PIXELS do rosto variam, a
+    # posição do paste fica fixa → output estável.
+    # Fallback: se só 1 frame (imagem), usa a bbox detectada direto.
+    if len(valid) > 1:
+        bxs = np.array([[c[0], c[1], c[2], c[3]] for c, _ in valid])
+        med = np.median(bxs, axis=0).astype(int)
+        stable_bbox = (int(med[0]), int(med[1]), int(med[2]), int(med[3]))
+    else:
+        stable_bbox = valid[0][0]
+
     frames: list = []
     coords: list = []
     latents: list = []
     mask_arrays: list = []
     crop_boxes: list = []
 
-    for bbox, frame in valid:
-        x1, y1, x2, y2 = bbox
-        y2 = min(y2 + extra_margin, frame.shape[0])
-        crop = frame[y1:y2, x1:x2]
+    x1s, y1s, x2s, y2s = stable_bbox
+
+    for _, frame in valid:
+        # Usa SEMPRE o bbox estabilizado — só os pixels variam, posição fixa.
+        y2 = min(y2s + extra_margin, frame.shape[0])
+        crop = frame[y1s:y2, x1s:x2s]
         if crop.size == 0:
             continue
         crop_256 = cv2.resize(crop, (256, 256), interpolation=cv2.INTER_LANCZOS4)
         latent = inference_engine.vae.get_latents_for_unet(crop_256)  # type: ignore[union-attr]
         mask_array, crop_box = get_image_prepare_material(
-            frame, [x1, y1, x2, y2], fp=fp, mode=parsing_mode,
+            frame, [x1s, y1s, x2s, y2], fp=fp, mode=parsing_mode,
         )
         frames.append(frame)
-        coords.append((x1, y1, x2, y2))
+        coords.append((x1s, y1s, x2s, y2))
         latents.append(latent)
         mask_arrays.append(mask_array)
         crop_boxes.append(crop_box)
