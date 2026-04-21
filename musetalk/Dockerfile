@@ -33,9 +33,11 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONPATH=/app
 
 # ── System deps ──────────────────────────────────────────────────────────────
+# rclone/cron removidos: o ai-gateway provisiona aigw-agent via SSH pós-deploy,
+# que instala rclone sob demanda e roda backup/heartbeat em background.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.10 python3.10-dev python3.10-venv python3-pip \
-    git curl ffmpeg aria2 cron rclone unzip \
+    git curl ffmpeg aria2 \
     libgl1 libglib2.0-0 libsm6 libxext6 libxrender-dev libgomp1 \
     && ln -sf /usr/bin/python3.10 /usr/bin/python3 \
     && rm -rf /var/lib/apt/lists/* \
@@ -96,11 +98,12 @@ RUN git clone --depth=1 https://github.com/ruxir-ig/MuseTalk-API /tmp/musetalk-s
     rm -rf /tmp/musetalk-src
 
 # ── Nossos arquivos ai-gateway ───────────────────────────────────────────────
+# backup_workspace.sh / restore_workspace.sh foram movidos pro ai-gateway
+# (server/pod-agent/) — provisionados via SSH após o pod ficar 'ready'.
 COPY server.py            /app/server.py
 COPY idle_watchdog.py     /app/idle_watchdog.py
 COPY start.sh             /app/start.sh
-COPY backup_workspace.sh  /app/backup_workspace.sh
-RUN chmod +x /app/start.sh /app/backup_workspace.sh
+RUN chmod +x /app/start.sh
 
 # Pasta persistente pros modelos
 RUN mkdir -p /app/models /app/data /app/results /workspace/.cache/huggingface

@@ -23,6 +23,10 @@ if [ -d "/workspace" ]; then
     echo "[musetalk] Disk /workspace: $(df -h /workspace | tail -1 | awk '{print $2 " total, " $4 " free"}')"
 fi
 
+# Backup/restore + heartbeat são instalados pelo ai-gateway via SSH
+# (pod-provisioner) logo depois do pod entrar em 'ready' — não precisamos
+# fazer nada aqui. Os scripts vão pra /usr/local/bin/aigw-{backup,restore,agent}.
+
 # Download dos pesos se ainda não baixados
 if [ ! -f "/app/models/musetalkV15/unet.pth" ]; then
     echo "[musetalk] Downloading weights (primeira vez)..."
@@ -32,22 +36,6 @@ if [ ! -f "/app/models/musetalkV15/unet.pth" ]; then
     }
 else
     echo "[musetalk] Weights já presentes: /app/models/musetalkV15/unet.pth"
-fi
-
-# ── Auto-backup do /workspace pro B2/S3 a cada N horas ─────────────────────
-# Roda no background. No-op se B2_ACCOUNT_ID não estiver setado.
-# Configurável via env: BACKUP_INTERVAL_HOURS (default 24).
-INTERVAL_H="${BACKUP_INTERVAL_HOURS:-24}"
-if [ -x /app/backup_workspace.sh ]; then
-    echo "[musetalk] Workspace auto-backup loop: every ${INTERVAL_H}h (no-op without B2_*)"
-    (
-        # Bootstrap delay: primeira execução em 5 min após boot
-        sleep 300
-        while true; do
-            /app/backup_workspace.sh || true
-            sleep "$((INTERVAL_H * 3600))"
-        done
-    ) &
 fi
 
 echo "[musetalk] Starting FastAPI server em 0.0.0.0:8000..."

@@ -105,6 +105,7 @@ async def lifespan(app: FastAPI):
     asyncio.get_event_loop().run_in_executor(None, _load_inference_engine)
     asyncio.create_task(start_watchdog())
     asyncio.create_task(_expire_stream_sessions())
+    asyncio.create_task(_expire_avatar_sessions_task())
     yield
     print("[musetalk] Shutdown", flush=True)
 
@@ -437,6 +438,197 @@ def _render_chunk_frames(session: Dict[str, Any], pcm_s16le_mono_16k: bytes, fps
     return out_frames
 
 
+# ── Real-time avatar endpoints (prepare-once, infer-fast) ───────────────────
+# Fluxo:
+#   1. POST /v1/avatar/prepare  (image) → avatar_id  ~10s uma vez
+#   2. POST /v1/avatar/infer    (audio, avatar_id) → mp4  sub-segundo
+#
+# Evita re-fazer face detection/parsing/VAE encode a cada request — o gargalo
+# do /v1/lipsync tradicional pra audios curtos. Target: real-time conversacional.
+
+avatar_sessions: Dict[str, Dict[str, Any]] = {}
+AVATAR_SESSION_TTL = 3600  # 1h
+
+
+async def _expire_avatar_sessions_task():
+    while True:
+        await asyncio.sleep(120)
+        now = time.time()
+        expired = [aid for aid, s in avatar_sessions.items()
+                   if (now - s.get("last_use", 0)) > AVATAR_SESSION_TTL]
+        for aid in expired:
+            avatar_sessions.pop(aid, None)
+            print(f"[avatar] expired session {aid}", flush=True)
+
+
+def _audio_bytes_to_pcm_16k_s16le_mono(audio_bytes: bytes, suffix: str) -> bytes:
+    """Converte qualquer formato suportado pelo ffmpeg → PCM 16kHz s16le mono."""
+    import subprocess as _sp
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
+        f.write(audio_bytes)
+        in_path = f.name
+    try:
+        out = _sp.run(
+            ["ffmpeg", "-nostdin", "-loglevel", "error", "-i", in_path,
+             "-f", "s16le", "-acodec", "pcm_s16le", "-ac", "1", "-ar", "16000", "-"],
+            capture_output=True, check=True, timeout=30,
+        )
+        return out.stdout
+    finally:
+        try: os.unlink(in_path)
+        except OSError: pass
+
+
+def _frames_to_mp4_with_audio(frames: list, audio_bytes: bytes, audio_suffix: str,
+                              fps: int, out_path: Path) -> None:
+    """Escreve frames BGR → mp4 H.264 + mux com áudio original via ffmpeg."""
+    import subprocess as _sp
+    if not frames:
+        raise ValueError("no frames to encode")
+    h, w = frames[0].shape[:2]
+    silent_mp4 = out_path.with_suffix(".silent.mp4")
+    # Write silent video first
+    vw = cv2.VideoWriter(str(silent_mp4), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+    for f in frames:
+        vw.write(f)
+    vw.release()
+
+    # Mux with audio + H.264 transcode for browser compatibility
+    with tempfile.NamedTemporaryFile(suffix=audio_suffix, delete=False) as af:
+        af.write(audio_bytes)
+        audio_path = af.name
+    try:
+        _sp.run([
+            "ffmpeg", "-nostdin", "-loglevel", "error", "-y",
+            "-i", str(silent_mp4),
+            "-i", audio_path,
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "128k",
+            "-shortest",
+            str(out_path),
+        ], check=True, timeout=60)
+    finally:
+        try: os.unlink(audio_path)
+        except OSError: pass
+        try: silent_mp4.unlink()
+        except OSError: pass
+
+
+@app.post("/v1/avatar/prepare")
+async def avatar_prepare(
+    image: UploadFile = File(...),
+    avatar_id: str = Form(...),
+    bbox_shift: int = Form(default=0),
+    extra_margin: int = Form(default=10, ge=0, le=40),
+    parsing_mode: str = Form(default="jaw"),
+    left_cheek_width: int = Form(default=90),
+    right_cheek_width: int = Form(default=90),
+):
+    """Pré-processa imagem/vídeo de referência (face detect + VAE encode + mask).
+
+    Cache persiste até AVATAR_SESSION_TTL sem uso. Reusar com /v1/avatar/infer.
+    """
+    _touch_activity()
+    if not model_loaded:
+        raise HTTPException(status_code=503, detail="model not loaded")
+    if not avatar_id or not avatar_id.replace("-", "").replace("_", "").isalnum():
+        raise HTTPException(status_code=400, detail="avatar_id must be alphanumeric (- and _ allowed)")
+
+    img_bytes = await image.read()
+    t0 = time.time()
+    try:
+        session = _preprocess_reference(
+            img_bytes, bbox_shift=bbox_shift, extra_margin=extra_margin,
+            parsing_mode=parsing_mode,
+            left_cheek_width=left_cheek_width, right_cheek_width=right_cheek_width,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"prepare failed: {e}")
+    elapsed = time.time() - t0
+    avatar_sessions[avatar_id] = session
+    return {
+        "avatar_id": avatar_id,
+        "prepared_in_s": round(elapsed, 3),
+        "ttl_s": AVATAR_SESSION_TTL,
+        "active_avatars": len(avatar_sessions),
+    }
+
+
+@app.post("/v1/avatar/infer")
+async def avatar_infer(
+    audio: UploadFile = File(...),
+    avatar_id: str = Form(...),
+    fps: int = Form(default=25, ge=1, le=60),
+):
+    """Fast inference usando avatar preparado. Target: sub-segundo pra 1-2s audio."""
+    global _active_requests
+    _touch_activity()
+    _active_requests += 1
+    try:
+        if not model_loaded:
+            raise HTTPException(status_code=503, detail="model not loaded")
+        session = avatar_sessions.get(avatar_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail=f"avatar_id '{avatar_id}' not prepared — call /v1/avatar/prepare first")
+
+        audio_bytes = await audio.read()
+        audio_suffix = Path(audio.filename or "in.wav").suffix or ".wav"
+        t0 = time.time()
+
+        # Convert to PCM 16kHz s16le mono (expected by _render_chunk_frames)
+        pcm = _audio_bytes_to_pcm_16k_s16le_mono(audio_bytes, suffix=audio_suffix)
+        t_audio = time.time()
+
+        frames = _render_chunk_frames(session, pcm, fps=fps)
+        t_unet = time.time()
+        if not frames:
+            raise HTTPException(status_code=500, detail="no frames rendered (audio too short?)")
+
+        # Write mp4
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as mp4_f:
+            mp4_path = Path(mp4_f.name)
+        try:
+            _frames_to_mp4_with_audio(frames, audio_bytes, audio_suffix, fps, mp4_path)
+            data = mp4_path.read_bytes()
+        finally:
+            try: mp4_path.unlink()
+            except OSError: pass
+
+        session["last_use"] = time.time()
+        total = time.time() - t0
+        headers = {
+            "X-Elapsed-Total-S": f"{total:.3f}",
+            "X-Elapsed-Audio-S": f"{t_audio - t0:.3f}",
+            "X-Elapsed-Unet-S": f"{t_unet - t_audio:.3f}",
+            "X-Elapsed-Mux-S": f"{total - (t_unet - t0):.3f}",
+            "X-Frames": str(len(frames)),
+            "Content-Disposition": 'attachment; filename="avatar.mp4"',
+        }
+        return Response(content=data, media_type="video/mp4", headers=headers)
+    finally:
+        _active_requests = max(0, _active_requests - 1)
+
+
+@app.get("/v1/avatar/list")
+async def avatar_list():
+    """Lista avatars preparados em cache."""
+    now = time.time()
+    return {
+        "count": len(avatar_sessions),
+        "avatars": [
+            {"avatar_id": aid, "idle_s": round(now - s.get("last_use", now), 1)}
+            for aid, s in avatar_sessions.items()
+        ],
+    }
+
+
+@app.delete("/v1/avatar/{avatar_id}")
+async def avatar_delete(avatar_id: str):
+    """Remove avatar do cache."""
+    existed = avatar_sessions.pop(avatar_id, None) is not None
+    return {"avatar_id": avatar_id, "deleted": existed}
+
+
 # ── Mouth refinement (single-frame, hybrid concat use-case) ─────────────────
 
 @app.post("/v1/refine_mouth")
@@ -510,39 +702,9 @@ async def refine_mouth(
         _touch_activity()
 
 
-# ── Workspace backup (manual trigger; auto-backup roda via start.sh) ───────
-
-@app.post("/v1/backup_now")
-async def backup_now():
-    """Trigger imediato do /app/backup_workspace.sh.
-
-    Útil pra:
-    - Forçar backup antes de pausar/encerrar pod
-    - Testar credenciais B2 sem esperar 24h
-    - Pipelines longos podem chamar antes de terminar pra garantir persistência
-
-    Retorna: {ok, exit_code, log_tail (últimas 30 linhas)}.
-    Não bloqueia: roda como subprocess e devolve resultado.
-    """
-    import subprocess as _sp
-    log_path = "/var/log/workspace_backup.log"
-    try:
-        r = _sp.run(["/app/backup_workspace.sh"],
-                    capture_output=True, text=True, timeout=1800)
-        log_tail = ""
-        try:
-            with open(log_path) as f:
-                log_tail = "\n".join(f.read().splitlines()[-30:])
-        except Exception:
-            pass
-        return {"ok": r.returncode == 0, "exit_code": r.returncode,
-                "stdout_tail": (r.stdout or "")[-2000:],
-                "stderr_tail": (r.stderr or "")[-2000:],
-                "log_tail": log_tail}
-    except _sp.TimeoutExpired:
-        raise HTTPException(504, "backup script timed out (>30 min)")
-    except FileNotFoundError:
-        raise HTTPException(500, "/app/backup_workspace.sh not found")
+# Endpoints /v1/backup_now, /v1/restore_now, /v1/backup_list removidos:
+# o ai-gateway gerencia backup/restore via SSH (pod-provisioner), e expõe
+# /v1/agent/state pra inspecionar estado dos pods.
 
 
 # ── Mouth refinement BATCH (block of frames, single MuseTalk call) ─────────
