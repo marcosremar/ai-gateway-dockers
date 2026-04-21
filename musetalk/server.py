@@ -297,53 +297,124 @@ async def lipsync(
 
 # ── Streaming helpers ───────────────────────────────────────────────────────
 
-def _preprocess_reference(img_bytes: bytes, bbox_shift: int, extra_margin: int,
-                          parsing_mode: str, left_cheek_width: int, right_cheek_width: int) -> Dict[str, Any]:
-    """Face detection + VAE encode do crop de referência. Idempotente,
-    chamado UMA vez por sessão — o resultado fica cacheado e é reusado
-    em todos os chunks de áudio."""
+def _preprocess_reference(ref_bytes: bytes, bbox_shift: int, extra_margin: int,
+                          parsing_mode: str, left_cheek_width: int, right_cheek_width: int,
+                          ref_suffix: str = ".png", max_frames: int = 200) -> Dict[str, Any]:
+    """Face detection + VAE encode para referência (imagem OU vídeo).
+
+    Detecta vídeo por suffix/magic: mp4, mov, webm, avi, mkv.
+    Pra vídeo: extrai até max_frames (8s @ 25fps = 200) e cacheia tudo — o
+    render rota por esses frames (i % N) durante inferência pra simular motion.
+    Pra imagem: lista de 1 frame (comportamento original).
+
+    Cada entrada em frames/coords/latents/mask_arrays/crop_boxes segue o mesmo
+    índice.
+    """
     from musetalk.utils.preprocessing import get_landmark_and_bbox, coord_placeholder  # type: ignore
     from musetalk.utils.face_parsing import FaceParsing  # type: ignore
+    from musetalk.utils.blending import get_image_prepare_material  # type: ignore
 
-    # Salva temp pro reader do preprocessing aceitar path
-    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
-        f.write(img_bytes)
-        img_path = f.name
+    VIDEO_SUFFIXES = {".mp4", ".mov", ".webm", ".avi", ".mkv", ".m4v"}
+    is_video = ref_suffix.lower() in VIDEO_SUFFIXES
+    # Extra guard: sniff by magic bytes
+    if not is_video and len(ref_bytes) >= 12:
+        if ref_bytes[4:8] == b"ftyp" or ref_bytes[:4] == b"\x1aE\xdf\xa3":  # mp4 or webm
+            is_video = True
+
+    img_paths: list[str] = []
+    tmp_paths: list[str] = []
     try:
-        coord_list, frame_list = get_landmark_and_bbox([img_path], bbox_shift)
+        if is_video:
+            # Extract frames via cv2.VideoCapture → PNGs in temp
+            with tempfile.NamedTemporaryFile(suffix=ref_suffix or ".mp4", delete=False) as f:
+                f.write(ref_bytes)
+                vpath = f.name
+            tmp_paths.append(vpath)
+            cap = cv2.VideoCapture(vpath)
+            total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            step = max(1, total // max_frames) if total > max_frames else 1
+            idx = 0
+            kept = 0
+            while True:
+                ok, frame = cap.read()
+                if not ok:
+                    break
+                if idx % step == 0 and kept < max_frames:
+                    png_path = tempfile.mktemp(suffix=".png")
+                    cv2.imwrite(png_path, frame)
+                    img_paths.append(png_path)
+                    tmp_paths.append(png_path)
+                    kept += 1
+                idx += 1
+            cap.release()
+            if not img_paths:
+                raise ValueError("Vídeo de referência não tem frames legíveis")
+        else:
+            with tempfile.NamedTemporaryFile(suffix=ref_suffix or ".png", delete=False) as f:
+                f.write(ref_bytes)
+                img_paths.append(f.name)
+                tmp_paths.append(f.name)
+
+        coord_list, frame_list = get_landmark_and_bbox(img_paths, bbox_shift)
     finally:
-        try: os.unlink(img_path)
-        except OSError: pass
+        for p in tmp_paths:
+            try: os.unlink(p)
+            except OSError: pass
 
-    if not coord_list or coord_list[0] == coord_placeholder:
-        raise ValueError("Nenhum rosto detectado na imagem de referência")
+    # Filter out frames with no face detected
+    valid = [
+        (c, f) for c, f in zip(coord_list, frame_list)
+        if c != coord_placeholder and c is not None
+    ]
+    if not valid:
+        raise ValueError("Nenhum rosto detectado na referência")
 
-    bbox = coord_list[0]
-    frame = frame_list[0]
-    x1, y1, x2, y2 = bbox
-    y2 = min(y2 + extra_margin, frame.shape[0])
-    crop = frame[y1:y2, x1:x2]
-    crop_256 = cv2.resize(crop, (256, 256), interpolation=cv2.INTER_LANCZOS4)
-
-    latent = inference_engine.vae.get_latents_for_unet(crop_256)  # type: ignore[union-attr]
     fp = FaceParsing(left_cheek_width=left_cheek_width, right_cheek_width=right_cheek_width)
 
-    # Pré-computa mask + crop_box UMA vez aqui (caros: face parser + blur).
-    # Blending por frame vira só paste com mask_array cached.
-    from musetalk.utils.blending import get_image_prepare_material  # type: ignore
-    mask_array, crop_box = get_image_prepare_material(
-        frame, [x1, y1, x2, y2], fp=fp, mode=parsing_mode,
-    )
+    frames: list = []
+    coords: list = []
+    latents: list = []
+    mask_arrays: list = []
+    crop_boxes: list = []
+
+    for bbox, frame in valid:
+        x1, y1, x2, y2 = bbox
+        y2 = min(y2 + extra_margin, frame.shape[0])
+        crop = frame[y1:y2, x1:x2]
+        if crop.size == 0:
+            continue
+        crop_256 = cv2.resize(crop, (256, 256), interpolation=cv2.INTER_LANCZOS4)
+        latent = inference_engine.vae.get_latents_for_unet(crop_256)  # type: ignore[union-attr]
+        mask_array, crop_box = get_image_prepare_material(
+            frame, [x1, y1, x2, y2], fp=fp, mode=parsing_mode,
+        )
+        frames.append(frame)
+        coords.append((x1, y1, x2, y2))
+        latents.append(latent)
+        mask_arrays.append(mask_array)
+        crop_boxes.append(crop_box)
+
+    if not frames:
+        raise ValueError("Nenhum frame válido após face parsing")
 
     return {
-        "frame": frame,
-        "coord": (x1, y1, x2, y2),
-        "latent": latent,
+        # Back-compat: single-value fields (first frame) still available for /v1/stream.
+        "frame": frames[0],
+        "coord": coords[0],
+        "latent": latents[0],
+        "mask_array": mask_arrays[0],
+        "crop_box": crop_boxes[0],
+        # New: lists for cycled-ref inference
+        "frames": frames,
+        "coords": coords,
+        "latents": latents,
+        "mask_arrays": mask_arrays,
+        "crop_boxes": crop_boxes,
+        "n_ref_frames": len(frames),
         "fp": fp,
-        "mask_array": mask_array,
-        "crop_box": crop_box,
         "extra_margin": extra_margin,
         "parsing_mode": parsing_mode,
+        "is_video_ref": is_video,
         "last_use": time.time(),
     }
 
@@ -403,28 +474,42 @@ def _render_chunk_frames(session: Dict[str, Any], pcm_s16le_mono_16k: bytes, fps
     if not whisper_chunks:
         return []
 
-    # Batch pelos chunks (todos compartilham a mesma latent)
+    # Batch pelos chunks; suporta LISTA de ref frames (cicla i % N).
     batch_size = 8
-    latent = session["latent"]
-    frame = session["frame"]
-    bbox = session["coord"]
-    mask_array = session["mask_array"]
-    crop_box = session["crop_box"]
-    x1, y1, x2, y2 = bbox
+    # Preferir listas (video-ref); fallback pros singletons (image-ref legada).
+    frames_ref = session.get("frames") or [session["frame"]]
+    coords_ref = session.get("coords") or [session["coord"]]
+    latents_ref = session.get("latents") or [session["latent"]]
+    masks_ref = session.get("mask_arrays") or [session["mask_array"]]
+    crop_boxes_ref = session.get("crop_boxes") or [session["crop_box"]]
+    n_ref = len(frames_ref)
 
     out_frames = []
+    out_idx = 0  # output frame counter (maps to ref_idx via modulo)
     with torch.no_grad():
         for i in range(0, len(whisper_chunks), batch_size):
             batch = whisper_chunks[i:i + batch_size]
             whisper_batch = torch.stack(batch, dim=0).to(engine.device).to(engine.weight_dtype)
-            latent_batch = latent.expand(len(batch), -1, -1, -1).to(dtype=engine.weight_dtype)
+            # Latente por output-frame (batch) — cicla ref
+            batch_latents = []
+            batch_refs = []
+            for k in range(len(batch)):
+                ref_idx = (out_idx + k) % n_ref
+                batch_latents.append(latents_ref[ref_idx])
+                batch_refs.append(ref_idx)
+            latent_batch = torch.cat(batch_latents, dim=0).to(dtype=engine.weight_dtype)
 
             audio_feature_batch = engine.pe(whisper_batch)
             pred_latents = engine.unet.model(
                 latent_batch, engine.timesteps, encoder_hidden_states=audio_feature_batch
             ).sample
             recon = engine.vae.decode_latents(pred_latents)
-            for res_frame in recon:
+            for k, res_frame in enumerate(recon):
+                ref_idx = batch_refs[k]
+                frame = frames_ref[ref_idx]
+                x1, y1, x2, y2 = coords_ref[ref_idx]
+                mask_array = masks_ref[ref_idx]
+                crop_box = crop_boxes_ref[ref_idx]
                 face = res_frame.astype(np.uint8)
                 try:
                     face_resized = cv2.resize(face, (x2 - x1, y2 - y1))
@@ -434,6 +519,7 @@ def _render_chunk_frames(session: Dict[str, Any], pcm_s16le_mono_16k: bytes, fps
                     frame, face_resized, [x1, y1, x2, y2], mask_array, crop_box,
                 )
                 out_frames.append(blended)
+            out_idx += len(batch)
 
     return out_frames
 
@@ -535,12 +621,14 @@ async def avatar_prepare(
         raise HTTPException(status_code=400, detail="avatar_id must be alphanumeric (- and _ allowed)")
 
     img_bytes = await image.read()
+    ref_suffix = Path(image.filename or "ref.png").suffix.lower() or ".png"
     t0 = time.time()
     try:
         session = _preprocess_reference(
             img_bytes, bbox_shift=bbox_shift, extra_margin=extra_margin,
             parsing_mode=parsing_mode,
             left_cheek_width=left_cheek_width, right_cheek_width=right_cheek_width,
+            ref_suffix=ref_suffix,
         )
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"prepare failed: {e}")
@@ -551,6 +639,8 @@ async def avatar_prepare(
         "prepared_in_s": round(elapsed, 3),
         "ttl_s": AVATAR_SESSION_TTL,
         "active_avatars": len(avatar_sessions),
+        "n_ref_frames": session.get("n_ref_frames", 1),
+        "is_video_ref": session.get("is_video_ref", False),
     }
 
 
