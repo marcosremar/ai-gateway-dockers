@@ -1,0 +1,51 @@
+# Fly.io config for fbx2glb — CPU-only Blender conversion service.
+#
+# Deploy:
+#   fly launch --no-deploy --copy-config --name <unique-app-name>    # first time
+#   fly deploy --image ghcr.io/marcosremar/fbx2glb:latest            # ships the prebuilt image
+#
+# Or build & deploy from source (slower, uses local Docker):
+#   fly deploy
+#
+# Suggested sizing: shared-cpu-2x / 2048 MB. Blender peak RAM on a
+# mid-size rigged FBX is around 800-1400 MB. 1x / 1024 MB has OOMed
+# on larger Mixamo exports during local tests; 2x gives head-room
+# without paying for a dedicated CPU.
+#
+# auto_stop_machines = "stop" + min_machines_running = 0 gives the
+# pause-when-idle behaviour that pairs naturally with the idle
+# watchdog inside the container (both hard-stop after inactivity,
+# so you only pay when converting).
+
+app = "fbx2glb"
+primary_region = "gru"     # São Paulo — closest to marcos. Adjust if needed.
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8000"
+  IDLE_TIMEOUT_MIN = "15"
+  MAX_FBX_BYTES = "268435456"   # 256 MB
+  CONVERT_TIMEOUT_SEC = "240"
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ["app"]
+
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "30s"
+    method = "GET"
+    path = "/health"
+
+[[vm]]
+  size = "shared-cpu-2x"
+  memory = "2gb"
+  cpus = 2
+  cpu_kind = "shared"
