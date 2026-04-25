@@ -55,3 +55,15 @@ jobs:
             ghcr.io/marcosremar/fbx2glb:${{ github.sha }}
           cache-from: type=gha,scope=fbx2glb
           cache-to: type=gha,mode=max,scope=fbx2glb
+
+  deploy:
+    # Deploy the freshly-built image to Fly.io. Requires FLY_API_TOKEN secret.
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: Deploy to Fly
+        run: flyctl deploy --remote-only --image marcosremar/fbx2glb:${{ github.sha }} -c fbx2glb/fly.toml
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}

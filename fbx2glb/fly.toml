@@ -25,7 +25,7 @@ primary_region = "gru"     # São Paulo — closest to marcos. Adjust if needed.
 
 [env]
   PORT = "8000"
-  IDLE_TIMEOUT_MIN = "15"
+  IDLE_TIMEOUT_MIN = "5"
   MAX_FBX_BYTES = "268435456"   # 256 MB
   CONVERT_TIMEOUT_SEC = "240"
 
