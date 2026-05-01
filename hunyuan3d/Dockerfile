@@ -34,9 +34,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN ln -sf /usr/bin/python3.10 /usr/bin/python && \
     ln -sf /usr/bin/pip3 /usr/bin/pip
 
-# PyTorch 2.5.1 + CUDA 12.4 (Hunyuan3D-2 tested on torch 2.5.x).
+# PyTorch 2.6+ is required by transformers for safe torch.load checkpoints.
 RUN pip install --no-cache-dir \
-    torch==2.5.1 torchvision==0.20.1 \
+    torch==2.6.0 torchvision==0.21.0 \
     --index-url https://download.pytorch.org/whl/cu124
 
 # Clone Hunyuan3D-2 (shape + texture pipelines live in hy3dgen/).
@@ -60,7 +60,8 @@ RUN cd hy3dgen/texgen/differentiable_renderer && \
 RUN pip install --no-cache-dir \
     fastapi uvicorn python-multipart httpx \
     huggingface_hub hf-xet \
-    accelerate einops
+    accelerate einops \
+    sentencepiece tiktoken
 
 # Add hy3dgen to PYTHONPATH so server.py can import it directly.
 ENV PYTHONPATH="/app/Hunyuan3D-2"
