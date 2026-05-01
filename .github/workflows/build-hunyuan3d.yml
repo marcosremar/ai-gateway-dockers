@@ -1,0 +1,106 @@
+name: Build hunyuan3d Docker image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "hunyuan3d/**"
+      - ".github/workflows/build-hunyuan3d.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache /usr/local/share/boost /usr/share/swift \
+            /usr/local/graalvm /usr/local/share/chromium /usr/local/share/powershell \
+            /usr/local/.ghcup /opt/az /usr/share/miniconda /usr/local/go \
+            /usr/local/julia* /usr/local/sqlpackage /opt/microsoft /usr/local/aws-cli
+          sudo apt-get purge -y -qq firefox google-chrome-stable \
+            microsoft-edge-stable dotnet* aspnetcore* 2>/dev/null || true
+          sudo apt-get autoremove -y -qq && sudo apt-get clean
+          docker system prune -af
+          echo "Free space:" && df -h /
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: hunyuan3d
+          file: hunyuan3d/Dockerfile
+          push: true
+          tags: |
+            marcosremar/hunyuan3d:latest
+            marcosremar/hunyuan3d:${{ github.sha }}
+            ghcr.io/marcosremar/hunyuan3d:latest
+            ghcr.io/marcosremar/hunyuan3d:${{ github.sha }}
+          cache-from: type=gha,scope=hunyuan3d
+          cache-to: type=gha,mode=max,scope=hunyuan3d
+
+      - name: Smoke test image (CPU mode, no GPU)
+        run: |
+          set -e
+          docker run -d --rm --name smoke \
+            marcosremar/hunyuan3d:latest \
+            bash -c "tail -f /dev/null"
+          sleep 5
+
+          echo "=== Verify file structure ==="
+          docker exec smoke ls -la /app/start.sh /app/server.py /app/Hunyuan3D-2/hy3dgen \
+            || (docker logs smoke; exit 1)
+
+          echo "=== Verify start.sh is executable ==="
+          docker exec smoke test -x /app/start.sh || (docker logs smoke; exit 1)
+
+          echo "=== Verify Python can import server modules ==="
+          docker exec smoke python -c "
+          import sys
+          sys.path.insert(0, '/app/Hunyuan3D-2')
+          import io, time, logging, tempfile, os
+          import fastapi, uvicorn, httpx
+          from PIL import Image
+          print('Basic imports OK')
+          import torch
+          print(f'torch {torch.__version__}')
+          # hy3dgen imports — these are the ones that silently break the
+          # model loader if a sub-dep is missing.
+          from hy3dgen.shapegen import Hunyuan3DDiTFlowMatchingPipeline
+          print('shapegen import OK')
+          from hy3dgen.rembg import BackgroundRemover
+          print('rembg import OK')
+          # Texture pipeline depends on the in-tree custom_rasterizer +
+          # differentiable_renderer C++ extensions. If these failed to
+          # build, the import below blows up at module load.
+          try:
+              from hy3dgen.texgen import Hunyuan3DPaintPipeline
+              print('texgen import OK')
+          except Exception as e:
+              print(f'WARN: texgen import failed (texture stage unavailable): {e}')
+          " || (docker logs smoke; exit 1)
+
+          echo "=== Verify sshd binary is present ==="
+          docker exec smoke which sshd || (docker logs smoke; exit 1)
+
+          echo "=== Cleanup ==="
+          docker stop smoke
