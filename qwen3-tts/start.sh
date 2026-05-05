@@ -34,8 +34,12 @@ ssh-keygen -A 2>/dev/null || true
 /usr/sbin/sshd -D &
 echo "[qwen3-tts] sshd started"
 
-# ── Pre-warm HF download so first request is fast ───────────────────────────
-python3 - <<'PY' || echo "[qwen3-tts] AVISO: pre-warm falhou, server tentará lazy-load"
+# ── Pre-warm HF download (background — must NOT block uvicorn) ──────────────
+# server.py lazy-loads weights on first /health call; pre-warming in
+# parallel avoids a long first-request stall but the gateway must be
+# able to probe /health immediately after boot, so we run it in the
+# background and let the foreground hand off to uvicorn right away.
+nohup python3 - >/tmp/hf_prewarm.log 2>&1 <<'PY' &
 import os
 from huggingface_hub import snapshot_download
 for env_key, default in [("QWEN3_TTS_MODEL", "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"),
@@ -45,6 +49,7 @@ for env_key, default in [("QWEN3_TTS_MODEL", "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoi
     snapshot_download(repo_id=repo, max_workers=4)
 print("ok")
 PY
+echo "[qwen3-tts] HF pre-warm in background (pid=$!)"
 
 echo "[qwen3-tts] Starting FastAPI server em 0.0.0.0:8000..."
 exec python3 /app/server.py
