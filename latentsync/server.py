@@ -155,7 +155,7 @@ async def lipsync(
         cfg = _resolve_config()
 
         cmd = [
-            "python", "-m", "scripts.inference",
+            "python3", "-m", "scripts.inference",
             "--unet_config_path", str(cfg),
             "--inference_ckpt_path", str(ckpt),
             "--video_path", str(in_video),
