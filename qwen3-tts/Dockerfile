@@ -36,7 +36,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN apt-get update -qq && apt-get install -y --no-install-recommends \
         python3 python3-pip python3-dev \
         git wget curl ca-certificates \
-        ffmpeg libsm6 libxext6 libgl1 libsndfile1 \
+        ffmpeg libsm6 libxext6 libgl1 libsndfile1 sox libsox-dev \
         openssh-server \
         build-essential \
     && rm -rf /var/lib/apt/lists/* \

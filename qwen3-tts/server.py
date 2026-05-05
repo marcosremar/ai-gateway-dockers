@@ -129,43 +129,59 @@ class SpeechRequest(BaseModel):
     speed: float = 1.0
 
 
-def _encode(audio: np.ndarray, fmt: str) -> tuple[bytes, str]:
+def _encode(audio: np.ndarray, fmt: str, sr: int = SAMPLE_RATE) -> tuple[bytes, str]:
     buf = io.BytesIO()
     if fmt in ("wav", "pcm"):
-        sf.write(buf, audio, SAMPLE_RATE, format="WAV", subtype="PCM_16")
+        sf.write(buf, audio, sr, format="WAV", subtype="PCM_16")
         return buf.getvalue(), "audio/wav"
     if fmt == "flac":
-        sf.write(buf, audio, SAMPLE_RATE, format="FLAC")
+        sf.write(buf, audio, sr, format="FLAC")
         return buf.getvalue(), "audio/flac"
     if fmt == "mp3":
-        sf.write(buf, audio, SAMPLE_RATE, format="MP3")
+        sf.write(buf, audio, sr, format="MP3")
         return buf.getvalue(), "audio/mpeg"
-    sf.write(buf, audio, SAMPLE_RATE, format="WAV", subtype="PCM_16")
+    sf.write(buf, audio, sr, format="WAV", subtype="PCM_16")
     return buf.getvalue(), "audio/wav"
 
 
 def _synth(text: str, voice: str, speed: float = 1.0,
            reference_audio: Optional[np.ndarray] = None,
            reference_sr: Optional[int] = None,
-           ref_text: Optional[str] = None) -> np.ndarray:
+           ref_text: Optional[str] = None,
+           language: str = "english") -> tuple[np.ndarray, int]:
+    """Synthesize. Returns (audio_float32, sample_rate).
+
+    qwen-tts's Qwen3TTSModel exposes three top-level methods:
+      - generate_voice_clone(text, ref_audio, ref_text, ...)  → ICL clone
+      - generate_voice_design(text, instruct, ...)            → free voice design
+      - generate_custom_voice(text, speaker, ...)             → preset speakers
+
+    We pick voice-clone when reference_audio is provided, custom-voice
+    otherwise. Both return (List[np.ndarray], sample_rate). """
     if model is None:
         raise RuntimeError(load_error or "model not loaded")
 
-    kwargs = {"speaker": voice, "speed": speed}
-    if reference_audio is not None:
-        kwargs["reference_audio"] = reference_audio
-        if reference_sr:
-            kwargs["reference_sample_rate"] = reference_sr
-        if ref_text:
-            kwargs["reference_text"] = ref_text
-
     with torch.inference_mode():
-        out = model.generate(text=text, **kwargs)
+        if reference_audio is not None:
+            audios, sr = model.generate_voice_clone(
+                text=text,
+                language=language,
+                ref_audio=(np.asarray(reference_audio, dtype=np.float32), int(reference_sr or 24_000)),
+                ref_text=ref_text or "",
+                x_vector_only_mode=not bool(ref_text),
+            )
+        else:
+            try:
+                audios, sr = model.generate_custom_voice(text=text, speaker=voice, language=language)
+            except Exception:
+                # Fallback: voice design (free-form prompt). Some packaged
+                # variants only expose this — try once before giving up.
+                audios, sr = model.generate_voice_design(text=text, instruct=f"Speak as {voice}.", language=language)
 
-    audio = out["audio"] if isinstance(out, dict) else out
+    audio = audios[0] if isinstance(audios, (list, tuple)) else audios
     if hasattr(audio, "cpu"):
         audio = audio.cpu().numpy()
-    return np.asarray(audio, dtype=np.float32).reshape(-1)
+    return np.asarray(audio, dtype=np.float32).reshape(-1), int(sr)
 
 
 @app.post("/v1/audio/speech")
@@ -175,12 +191,12 @@ async def speech(req: SpeechRequest) -> Response:
         raise HTTPException(400, "input must be non-empty")
     async with inference_lock:
         try:
-            audio = await asyncio.get_event_loop().run_in_executor(
+            audio, sr = await asyncio.get_event_loop().run_in_executor(
                 None, _synth, req.input, req.voice, req.speed,
             )
         except Exception as exc:
             raise HTTPException(500, f"synthesis failed: {exc}")
-    body, ctype = _encode(audio, req.response_format)
+    body, ctype = _encode(audio, req.response_format, sr)
     return Response(content=body, media_type=ctype)
 
 
@@ -210,13 +226,13 @@ async def speech_clone(
 
     async with inference_lock:
         try:
-            audio = await asyncio.get_event_loop().run_in_executor(
+            audio, sr = await asyncio.get_event_loop().run_in_executor(
                 None, _synth, text, "Ryan", speed, ref_audio, ref_sr, ref_text,
             )
         except Exception as exc:
             raise HTTPException(500, f"voice-clone synthesis failed: {exc}")
 
-    body, ctype = _encode(audio, response_format)
+    body, ctype = _encode(audio, response_format, sr)
     return Response(content=body, media_type=ctype)
 
 
