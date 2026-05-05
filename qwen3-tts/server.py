@@ -60,10 +60,25 @@ def _load_model() -> None:
     global model, load_error, load_traceback
     try:
         from qwen_tts import Qwen3TTSModel  # type: ignore
-        model = Qwen3TTSModel.from_pretrained(MODEL_REPO, torch_dtype=torch.float16)
-        if torch.cuda.is_available():
-            model.to("cuda")
-        model.eval()
+        # qwen-tts handles dtype + device internally; pass `device` when the
+        # constructor accepts it, otherwise fall back to whatever ships in
+        # this version of the wheel and skip the .to() / .eval() calls that
+        # only exist on `nn.Module` subclasses.
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        try:
+            model = Qwen3TTSModel.from_pretrained(
+                MODEL_REPO, torch_dtype=torch.float16, device=device,
+            )
+        except TypeError:
+            model = Qwen3TTSModel.from_pretrained(MODEL_REPO, torch_dtype=torch.float16)
+        for fn in ("to", "eval"):
+            method = getattr(model, fn, None)
+            if not callable(method):
+                continue
+            try:
+                method("cuda") if fn == "to" else method()
+            except Exception:
+                pass
     except Exception as exc:
         import traceback
         load_error = str(exc)
