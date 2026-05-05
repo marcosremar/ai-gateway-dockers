@@ -54,6 +54,15 @@ ARG LATENTSYNC_REF=main
 RUN git clone --depth 1 --branch ${LATENTSYNC_REF} \
         https://github.com/bytedance/LatentSync.git /app/LatentSync
 
+# Bake Whisper tiny.pt (audio2feature dep). LatentSync's inference resolves
+# `checkpoints/whisper/tiny.pt` relative to its repo root; if the file is
+# missing the inference subprocess crashes with `Model checkpoints/whisper/
+# tiny.pt not found`. Pre-downloading at build time avoids a runtime fetch
+# (and the 500 it produces on the very first /v1/lipsync request).
+RUN mkdir -p /app/LatentSync/checkpoints/whisper \
+    && wget -q -O /app/LatentSync/checkpoints/whisper/tiny.pt \
+       https://openaipublic.azureedge.net/main/whisper/models/65147644a518d12f04e32d6f3b26facc3f8dd46e5390956a9424a650c0ce22b9/tiny.pt
+
 # PyTorch + the LatentSync requirements pinned by upstream. We let the
 # upstream `requirements.txt` resolve transitively; the gateway only needs
 # fastapi/uvicorn/python-multipart/hf_transfer on top for the HTTP shim.

@@ -42,7 +42,7 @@ echo "[qwen3-tts] sshd started"
 nohup python3 - >/tmp/hf_prewarm.log 2>&1 <<'PY' &
 import os
 from huggingface_hub import snapshot_download
-for env_key, default in [("QWEN3_TTS_MODEL", "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"),
+for env_key, default in [("QWEN3_TTS_MODEL", "Qwen/Qwen3-TTS-12Hz-1.7B-Base"),
                           ("QWEN3_TTS_TOKENIZER", "Qwen/Qwen3-TTS-Tokenizer-12Hz")]:
     repo = os.environ.get(env_key, default)
     print(f"snapshot_download {repo}")

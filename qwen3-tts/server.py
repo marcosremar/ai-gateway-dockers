@@ -34,7 +34,34 @@ import uvicorn
 
 from idle_watchdog import add_idle_middleware, start_watchdog, touch_activity
 
-MODEL_REPO = os.environ.get("QWEN3_TTS_MODEL", "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice")
+# Patch transformers' MimiConv1d._pad1d (used by Qwen3-TTS speech tokenizer).
+# torch.nn.functional.pad with mode="replicate" / "reflect" has no fp16 kernel
+# (`replication_pad1d not implemented for Half`), so when the model is loaded
+# in fp16 the voice-clone path crashes inside the mimi audio encoder. We
+# upcast the conv input to fp32 transiently and cast back. Negligible perf
+# hit, conv is tiny relative to the rest of the encoder.
+def _patch_mimi_pad1d() -> None:
+    try:
+        from transformers.models.mimi import modeling_mimi as _mimi  # type: ignore
+        if getattr(_mimi.MimiConv1d._pad1d, "_qwen3_patched", False):
+            return
+        _orig = _mimi.MimiConv1d._pad1d
+        def _safe_pad1d(hidden_states, paddings, mode="zero", value=0.0):
+            if hidden_states.dtype in (torch.float16, torch.bfloat16):
+                out = _orig(hidden_states.to(torch.float32), paddings, mode, value)
+                return out.to(hidden_states.dtype)
+            return _orig(hidden_states, paddings, mode, value)
+        _safe_pad1d._qwen3_patched = True  # type: ignore[attr-defined]
+        _mimi.MimiConv1d._pad1d = staticmethod(_safe_pad1d)
+    except Exception:
+        # Patch is best-effort; if transformers' internals change we fall
+        # back to the original behaviour (which is correct for fp32 models).
+        pass
+
+
+_patch_mimi_pad1d()
+
+MODEL_REPO = os.environ.get("QWEN3_TTS_MODEL", "Qwen/Qwen3-TTS-12Hz-1.7B-Base")
 SAMPLE_RATE = 24_000
 
 inference_lock = asyncio.Lock()
