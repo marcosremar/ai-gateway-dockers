@@ -85,9 +85,17 @@ def _load_model() -> None:
         load_traceback = traceback.format_exc()
 
 
+async def _load_model_async() -> None:
+    await asyncio.get_event_loop().run_in_executor(None, _load_model)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    await asyncio.get_event_loop().run_in_executor(None, _load_model)
+    # Fire-and-forget — uvicorn must accept /health probes immediately
+    # so the gateway boot poller doesn't time out during the ~30-90s the
+    # weights take to download+initialise. /health reports degraded until
+    # `model` is bound; /v1/audio/speech returns 503 in the same window.
+    asyncio.create_task(_load_model_async())
     asyncio.create_task(start_watchdog())
     yield
 
