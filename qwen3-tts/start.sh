@@ -38,8 +38,11 @@ echo "[qwen3-tts] sshd started"
 python3 - <<'PY' || echo "[qwen3-tts] AVISO: pre-warm falhou, server tentará lazy-load"
 import os
 from huggingface_hub import snapshot_download
-repo = os.environ.get("QWEN3_TTS_MODEL", "Qwen/Qwen3-TTS")
-snapshot_download(repo_id=repo, max_workers=4)
+for env_key, default in [("QWEN3_TTS_MODEL", "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"),
+                          ("QWEN3_TTS_TOKENIZER", "Qwen/Qwen3-TTS-Tokenizer-12Hz")]:
+    repo = os.environ.get(env_key, default)
+    print(f"snapshot_download {repo}")
+    snapshot_download(repo_id=repo, max_workers=4)
 print("ok")
 PY
 

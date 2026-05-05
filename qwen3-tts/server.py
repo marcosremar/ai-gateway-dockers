@@ -34,7 +34,7 @@ import uvicorn
 
 from idle_watchdog import add_idle_middleware, start_watchdog, touch_activity
 
-MODEL_REPO = os.environ.get("QWEN3_TTS_MODEL", "Qwen/Qwen3-TTS")
+MODEL_REPO = os.environ.get("QWEN3_TTS_MODEL", "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice")
 SAMPLE_RATE = 24_000
 
 inference_lock = asyncio.Lock()
