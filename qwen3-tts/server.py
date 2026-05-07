@@ -413,14 +413,14 @@ def _synth(text: str, voice: str, speed: float = 1.0,
         audio = audio.cpu().numpy()
     out = np.asarray(audio, dtype=np.float32).reshape(-1)
     raw_dur = out.shape[0] / max(int(sr), 1)
-    # Two-stage trim. Qwen3-TTS-Base often emits 5-15× excess audio because
-    # the talker LM rarely samples EOS — but the tail isn't silence, it's
-    # repeated/garbled speech at full amplitude. So:
-    #   1. Trim trailing/leading silence (cheap, handles clean cases).
-    #   2. VAD-style cut at the first long gap (>=250ms below -32dB) after
-    #      a minimum of 2s of speech. This catches the post-content
-    #      sentence boundary where the model briefly pauses before
-    #      hallucinating the next sentence.
+    # Light edge trim only — strip leading/trailing silence so the wav
+    # starts/ends crisply for concat. Internal pauses (commas, sentence
+    # boundaries) MUST be preserved or chunks come out missing words —
+    # the earlier VAD-cut at first 250ms gap after 2s was truncating
+    # whole second-halves of sentences (Whisper round-trip showed 31%
+    # word-error-rate). Trust the EOS sampling now that we use the
+    # official generation_config.json defaults; cap below is a safety
+    # net not a forced truncation point.
     try:
         import librosa  # type: ignore
         trimmed, _ = librosa.effects.trim(out, top_db=35, frame_length=2048, hop_length=512)
@@ -428,32 +428,33 @@ def _synth(text: str, voice: str, speed: float = 1.0,
             out = trimmed
     except Exception as e:
         log.warning(f"[tts.synth.trim.skip] {e}")
-    cut_dur = out.shape[0] / max(int(sr), 1)
-    try:
-        win = max(1, int(sr) // 50)  # 20ms RMS frames
-        n = (out.shape[0] // win) * win
-        rms = np.sqrt(np.mean(out[:n].reshape(-1, win) ** 2, axis=1))
-        thresh = 10 ** (-32 / 20)
-        silent = rms < thresh
-        # Need >=12 consecutive silent 20ms frames (250ms gap), starting
-        # only after 2s of audio (avoid cutting mid-hook).
-        min_run = 12
-        skip_frames = int(2 * sr / win)
-        run = 0; cut_at = None
-        for idx in range(skip_frames, len(silent)):
-            if silent[idx]:
-                run += 1
-                if run >= min_run:
-                    cut_at = (idx - run + 1) * win
-                    break
-            else:
-                run = 0
-        if cut_at is not None and cut_at >= int(2 * sr):
-            out = out[:cut_at]
-            cut_dur = out.shape[0] / max(int(sr), 1)
-            log.info(f"[tts.synth.vad_cut] cut at {cut_dur:.2f}s (had {raw_dur:.2f}s)")
-    except Exception as e:
-        log.warning(f"[tts.synth.vad.skip] {e}")
+    # Optional aggressive VAD-cut, off by default. Set
+    # QWEN3_TTS_VAD_CUT=1 to re-enable for runs where you'd rather lose
+    # tail content than risk hallucinated overrun.
+    if os.environ.get("QWEN3_TTS_VAD_CUT", "0") == "1":
+        try:
+            win = max(1, int(sr) // 50)
+            n = (out.shape[0] // win) * win
+            rms = np.sqrt(np.mean(out[:n].reshape(-1, win) ** 2, axis=1))
+            thresh = 10 ** (-32 / 20)
+            silent = rms < thresh
+            min_run = int(os.environ.get("QWEN3_TTS_VAD_MIN_GAP_MS", "600")) // 20
+            skip_frames = int(float(os.environ.get("QWEN3_TTS_VAD_SKIP_S", "3")) * sr / win)
+            run = 0; cut_at = None
+            for idx in range(skip_frames, len(silent)):
+                if silent[idx]:
+                    run += 1
+                    if run >= min_run:
+                        cut_at = (idx - run + 1) * win
+                        break
+                else:
+                    run = 0
+            if cut_at is not None and cut_at >= skip_frames * win:
+                out = out[:cut_at]
+                log.info(f"[tts.synth.vad_cut] cut at "
+                         f"{out.shape[0]/sr:.2f}s (had {raw_dur:.2f}s)")
+        except Exception as e:
+            log.warning(f"[tts.synth.vad.skip] {e}")
     log.info(f"[tts.synth.done] samples={out.shape[0]} sr={int(sr)} "
              f"duration_s={out.shape[0]/max(int(sr),1):.2f} raw_s={raw_dur:.2f}")
     return out, int(sr)
