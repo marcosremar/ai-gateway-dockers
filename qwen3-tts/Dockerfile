@@ -68,13 +68,13 @@ RUN pip install --upgrade pip \
          "fastapi>=0.115" "uvicorn[standard]>=0.32" python-multipart \
          hf_transfer huggingface_hub soundfile numpy librosa pydantic-settings \
     # flash-attn is REQUIRED for stable Qwen3-TTS-Base voice-clone generation.
-    # Without it, the qwen-tts library prints
-    #   "Warning: flash-attn is not installed. Will only run the manual PyTorch version."
-    # and the manual path produces unreliable EOS sampling — the model
-    # generates audio until it hits max_new_tokens, yielding 30-600s of
-    # repeated/garbled output for short texts. Building flash-attn from
-    # source so the wheel matches the torch 2.5 / cu124 ABI.
-    && MAX_JOBS=2 pip install "flash-attn==2.7.4.post1" --no-build-isolation
+    # Without it, qwen-tts prints "flash-attn is not installed" and the manual
+    # PyTorch path has unreliable EOS sampling, so the model runs to
+    # max_new_tokens (30-600s of garbled output). Source builds need nvcc
+    # (only in -devel base) so we use the upstream prebuilt wheel matching
+    # torch 2.5 + cu124 + cp310 + cxx11abi=FALSE (matches torch's default ABI).
+    && pip install \
+         "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.5cxx11abiFALSE-cp310-cp310-linux_x86_64.whl"
 
 COPY server.py            /app/server.py
 COPY idle_watchdog.py     /app/idle_watchdog.py
