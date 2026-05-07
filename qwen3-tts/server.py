@@ -13,12 +13,18 @@ for kokoro-tts or Modal qwen3-tts without caller changes:
 
 Env:
   IDLE_TIMEOUT_MIN     — auto-shutdown after no requests (default 15).
-  QWEN3_TTS_MODEL      — HF repo id (default Qwen/Qwen3-TTS).
+  QWEN3_TTS_MODEL      — HF repo id (default Qwen/Qwen3-TTS-12Hz-1.7B-Base).
+  QWEN3_TTS_DTYPE      — bfloat16|float16|float32 (default bfloat16).
+  QWEN3_TTS_ATTN       — flash_attention_2|sdpa|eager (default sdpa).
+  QWEN3_TTS_LANG       — default language (default "English").
+  QWEN3_TTS_TIMEOUT_S  — per-request synth timeout seconds (default 120).
+  QWEN3_TTS_WARMUP     — set 0 to skip startup warmup (default 1).
   PORT                 — listen port (default 8000).
 """
 
 import asyncio
 import io
+import logging
 import os
 import time
 from contextlib import asynccontextmanager
@@ -34,6 +40,14 @@ import uvicorn
 
 from idle_watchdog import add_idle_middleware, start_watchdog, touch_activity
 
+# ── Logging ─────────────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=os.environ.get("LOG_LEVEL", "INFO"),
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+log = logging.getLogger("qwen3-tts")
+
+
 # Patch transformers' MimiConv1d._pad1d (used by Qwen3-TTS speech tokenizer).
 # torch.nn.functional.pad with mode="replicate" / "reflect" has no fp16 kernel
 # (`replication_pad1d not implemented for Half`), so when the model is loaded
@@ -47,28 +61,44 @@ def _patch_mimi_pad1d() -> None:
             return
         _orig = _mimi.MimiConv1d._pad1d
         def _safe_pad1d(hidden_states, paddings, mode="zero", value=0.0):
-            if hidden_states.dtype in (torch.float16, torch.bfloat16):
+            if hidden_states.dtype in (torch.float16,):
+                # bf16 has a native replication_pad1d kernel on recent torch,
+                # only fp16 still lacks it — keep upcast scoped to fp16 only.
                 out = _orig(hidden_states.to(torch.float32), paddings, mode, value)
                 return out.to(hidden_states.dtype)
             return _orig(hidden_states, paddings, mode, value)
         _safe_pad1d._qwen3_patched = True  # type: ignore[attr-defined]
         _mimi.MimiConv1d._pad1d = staticmethod(_safe_pad1d)
-    except Exception:
-        # Patch is best-effort; if transformers' internals change we fall
-        # back to the original behaviour (which is correct for fp32 models).
-        pass
+        log.info("[tts.patch] mimi pad1d fp16 upcast installed")
+    except Exception as exc:
+        log.warning(f"[tts.patch.fail] {exc}")
 
 
 _patch_mimi_pad1d()
 
+# ── Config ──────────────────────────────────────────────────────────────────
 MODEL_REPO = os.environ.get("QWEN3_TTS_MODEL", "Qwen/Qwen3-TTS-12Hz-1.7B-Base")
 SAMPLE_RATE = 24_000
+DEFAULT_LANG = os.environ.get("QWEN3_TTS_LANG", "English")
+TIMEOUT_S = float(os.environ.get("QWEN3_TTS_TIMEOUT_S", "120"))
+WARMUP = os.environ.get("QWEN3_TTS_WARMUP", "1") != "0"
+
+_DTYPE_MAP = {
+    "bfloat16": torch.bfloat16, "bf16": torch.bfloat16,
+    "float16": torch.float16,   "fp16": torch.float16,   "half": torch.float16,
+    "float32": torch.float32,   "fp32": torch.float32,   "float": torch.float32,
+}
+DTYPE_NAME = os.environ.get("QWEN3_TTS_DTYPE", "bfloat16").lower()
+DTYPE = _DTYPE_MAP.get(DTYPE_NAME, torch.bfloat16)
+ATTN_IMPL = os.environ.get("QWEN3_TTS_ATTN", "sdpa")  # safer default than flash_attention_2
 
 inference_lock = asyncio.Lock()
 boot_ts = time.time()
 model = None
 load_error: Optional[str] = None
 load_traceback: Optional[str] = None
+warmup_ok: bool = False
+warmup_error: Optional[str] = None
 
 # Built-in voices — actual list comes from the model. We expose a static
 # fallback for the listing endpoint when the model fails to load so the
@@ -83,37 +113,97 @@ DEFAULT_VOICES = [
 ]
 
 
+# ── Model loading ───────────────────────────────────────────────────────────
+
 def _load_model() -> None:
+    """Load Qwen3TTSModel using the OFFICIAL kwarg names.
+
+    Per https://github.com/QwenLM/Qwen3-TTS the constructor expects
+    `dtype=` (not `torch_dtype=`), `device_map=`, and an optional
+    `attn_implementation=`. The previous implementation used `torch_dtype=`
+    which the library silently ignores → model loaded in default dtype with
+    nondeterministic device placement, leading to indefinite hangs on the
+    first generation call.
+    """
     global model, load_error, load_traceback
+    log.info(f"[tts.load.start] repo={MODEL_REPO} dtype={DTYPE_NAME} attn={ATTN_IMPL}")
     try:
         from qwen_tts import Qwen3TTSModel  # type: ignore
-        # qwen-tts handles dtype + device internally; pass `device` when the
-        # constructor accepts it, otherwise fall back to whatever ships in
-        # this version of the wheel and skip the .to() / .eval() calls that
-        # only exist on `nn.Module` subclasses.
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+
+        device_map = "cuda:0" if torch.cuda.is_available() else "cpu"
+        kwargs = dict(device_map=device_map, dtype=DTYPE)
+        if ATTN_IMPL and ATTN_IMPL != "auto":
+            kwargs["attn_implementation"] = ATTN_IMPL
+
         try:
-            model = Qwen3TTSModel.from_pretrained(
-                MODEL_REPO, torch_dtype=torch.float16, device=device,
-            )
-        except TypeError:
-            model = Qwen3TTSModel.from_pretrained(MODEL_REPO, torch_dtype=torch.float16)
-        for fn in ("to", "eval"):
-            method = getattr(model, fn, None)
-            if not callable(method):
-                continue
+            mdl = Qwen3TTSModel.from_pretrained(MODEL_REPO, **kwargs)
+        except TypeError as te:
+            # Older qwen-tts wheel may not accept attn_implementation —
+            # retry without it. Same for device_map vs device.
+            log.warning(f"[tts.load.retry] {te} — retrying without attn_implementation")
+            kwargs.pop("attn_implementation", None)
             try:
-                method("cuda") if fn == "to" else method()
-            except Exception:
-                pass
+                mdl = Qwen3TTSModel.from_pretrained(MODEL_REPO, **kwargs)
+            except TypeError as te2:
+                log.warning(f"[tts.load.retry2] {te2} — falling back to torch_dtype/device")
+                mdl = Qwen3TTSModel.from_pretrained(
+                    MODEL_REPO, torch_dtype=DTYPE,
+                    device="cuda" if torch.cuda.is_available() else "cpu",
+                )
+
+        # Some Qwen3TTSModel wheels are nn.Module subclasses (have .to/.eval),
+        # others are wrapper objects without those methods. Be defensive.
+        for fn in ("to", "eval"):
+            method = getattr(mdl, fn, None)
+            if callable(method):
+                try:
+                    method("cuda") if fn == "to" else method()
+                except Exception as e:
+                    log.warning(f"[tts.load.{fn}.skip] {e}")
+        model = mdl
+        log.info("[tts.load.done]")
     except Exception as exc:
         import traceback
         load_error = str(exc)
         load_traceback = traceback.format_exc()
+        log.error(f"[tts.load.fail] {exc}\n{load_traceback}")
 
 
-async def _load_model_async() -> None:
+def _warmup() -> None:
+    """JIT CUDA kernels + verify the synthesis path works end-to-end.
+
+    Catches lazy-init bugs (kernel compilation, codec download, lock
+    initialization) at boot rather than on the first user request — which
+    is what makes the bug 'manifest as a hang'. If warmup fails, the
+    /health response surfaces it so the gateway redeploys.
+    """
+    global warmup_ok, warmup_error
+    if model is None:
+        warmup_error = "model not loaded; skipping warmup"
+        return
+    try:
+        log.info("[tts.warmup.start]")
+        t0 = time.time()
+        with torch.inference_mode():
+            audios, sr = model.generate_custom_voice(
+                text="Hello.", language=DEFAULT_LANG, speaker="Ryan",
+            )
+        audio = audios[0] if isinstance(audios, (list, tuple)) else audios
+        if hasattr(audio, "cpu"):
+            audio = audio.cpu().numpy()
+        n = int(np.asarray(audio).reshape(-1).shape[0])
+        warmup_ok = True
+        log.info(f"[tts.warmup.done] sr={sr} samples={n} elapsed={time.time()-t0:.2f}s")
+    except Exception as exc:
+        import traceback
+        warmup_error = str(exc)
+        log.error(f"[tts.warmup.fail] {exc}\n{traceback.format_exc()}")
+
+
+async def _load_and_warmup_async() -> None:
     await asyncio.get_event_loop().run_in_executor(None, _load_model)
+    if WARMUP and model is not None:
+        await asyncio.get_event_loop().run_in_executor(None, _warmup)
 
 
 @asynccontextmanager
@@ -122,7 +212,7 @@ async def lifespan(_: FastAPI):
     # so the gateway boot poller doesn't time out during the ~30-90s the
     # weights take to download+initialise. /health reports degraded until
     # `model` is bound; /v1/audio/speech returns 503 in the same window.
-    asyncio.create_task(_load_model_async())
+    asyncio.create_task(_load_and_warmup_async())
     asyncio.create_task(start_watchdog())
     yield
 
@@ -134,12 +224,26 @@ add_idle_middleware(app)
 @app.get("/health")
 async def health() -> dict:
     return {
-        "status": "healthy" if load_error is None else "degraded",
+        "status": "healthy" if (load_error is None and warmup_error is None) else "degraded",
         "model_loaded": model is not None,
+        "warmup_ok": warmup_ok,
+        "warmup_error": warmup_error,
         "model": MODEL_REPO,
+        "dtype": DTYPE_NAME,
+        "attn_impl": ATTN_IMPL,
+        "language_default": DEFAULT_LANG,
         "uptime_s": round(time.time() - boot_ts, 1),
         "gpu_available": torch.cuda.is_available(),
         "load_error": load_error,
+    }
+
+
+@app.get("/health/diag")
+async def health_diag() -> dict:
+    """Detailed diagnostic — includes traceback if load failed."""
+    return {
+        **(await health()),
+        "load_traceback": load_traceback,
     }
 
 
@@ -154,6 +258,7 @@ class SpeechRequest(BaseModel):
     voice: str = "Ryan"
     response_format: str = "wav"
     speed: float = 1.0
+    language: Optional[str] = None
 
 
 def _encode(audio: np.ndarray, fmt: str, sr: int = SAMPLE_RATE) -> tuple[bytes, str]:
@@ -171,44 +276,100 @@ def _encode(audio: np.ndarray, fmt: str, sr: int = SAMPLE_RATE) -> tuple[bytes, 
     return buf.getvalue(), "audio/wav"
 
 
+def _resample_mono(audio: np.ndarray, sr_in: int, sr_out: int = 24_000) -> np.ndarray:
+    """Resample to mono `sr_out`. Uses librosa if available (better quality),
+    falls back to a simple linear interp."""
+    a = np.asarray(audio, dtype=np.float32)
+    if a.ndim > 1:
+        a = a.mean(axis=1)
+    if int(sr_in) == int(sr_out):
+        return a
+    try:
+        import librosa  # type: ignore
+        return librosa.resample(a, orig_sr=int(sr_in), target_sr=int(sr_out)).astype(np.float32)
+    except Exception:
+        n_out = int(round(a.shape[0] * sr_out / sr_in))
+        if n_out <= 0:
+            return a
+        x_old = np.linspace(0.0, 1.0, num=a.shape[0], endpoint=False)
+        x_new = np.linspace(0.0, 1.0, num=n_out, endpoint=False)
+        return np.interp(x_new, x_old, a).astype(np.float32)
+
+
 def _synth(text: str, voice: str, speed: float = 1.0,
            reference_audio: Optional[np.ndarray] = None,
            reference_sr: Optional[int] = None,
            ref_text: Optional[str] = None,
-           language: str = "english") -> tuple[np.ndarray, int]:
+           language: Optional[str] = None) -> tuple[np.ndarray, int]:
     """Synthesize. Returns (audio_float32, sample_rate).
 
     qwen-tts's Qwen3TTSModel exposes three top-level methods:
-      - generate_voice_clone(text, ref_audio, ref_text, ...)  → ICL clone
-      - generate_voice_design(text, instruct, ...)            → free voice design
-      - generate_custom_voice(text, speaker, ...)             → preset speakers
+      - generate_voice_clone(text, language, ref_audio, ref_text, ...)  → ICL clone
+      - generate_voice_design(text, language, instruct, ...)            → free voice design
+      - generate_custom_voice(text, language, speaker, ...)             → preset speakers
 
     We pick voice-clone when reference_audio is provided, custom-voice
-    otherwise. Both return (List[np.ndarray], sample_rate). """
+    otherwise. Both return (List[np.ndarray], sample_rate).
+    """
     if model is None:
         raise RuntimeError(load_error or "model not loaded")
 
+    lang = (language or DEFAULT_LANG).strip()
+    # Qwen3 expects capitalized language names: "English", "Chinese", "Auto"
+    # — lowercase silently routes to a fallback that may hang on the
+    # speaker-conditioning branch. Normalise common aliases.
+    LANG_NORM = {
+        "en": "English", "english": "English",
+        "zh": "Chinese", "chinese": "Chinese",
+        "ja": "Japanese", "japanese": "Japanese",
+        "ko": "Korean", "korean": "Korean",
+        "de": "German", "german": "German",
+        "fr": "French", "french": "French",
+        "ru": "Russian", "russian": "Russian",
+        "pt": "Portuguese", "portuguese": "Portuguese",
+        "es": "Spanish", "spanish": "Spanish",
+        "it": "Italian", "italian": "Italian",
+        "auto": "Auto",
+    }
+    lang = LANG_NORM.get(lang.lower(), lang)
+
+    log.info(f"[tts.synth.start] mode={'clone' if reference_audio is not None else 'preset'} "
+             f"lang={lang} voice={voice} text_len={len(text)}")
+
+    t0 = time.time()
     with torch.inference_mode():
         if reference_audio is not None:
+            ref_arr = _resample_mono(reference_audio, int(reference_sr or 24_000), SAMPLE_RATE)
+            log.info(f"[tts.model.call] generate_voice_clone "
+                     f"ref_samples={ref_arr.shape[0]} ref_sr={SAMPLE_RATE} "
+                     f"ref_text_len={len(ref_text or '')}")
             audios, sr = model.generate_voice_clone(
                 text=text,
-                language=language,
-                ref_audio=(np.asarray(reference_audio, dtype=np.float32), int(reference_sr or 24_000)),
+                language=lang,
+                ref_audio=(ref_arr, SAMPLE_RATE),
                 ref_text=ref_text or "",
                 x_vector_only_mode=not bool(ref_text),
             )
         else:
+            log.info(f"[tts.model.call] generate_custom_voice speaker={voice}")
             try:
-                audios, sr = model.generate_custom_voice(text=text, speaker=voice, language=language)
-            except Exception:
-                # Fallback: voice design (free-form prompt). Some packaged
-                # variants only expose this — try once before giving up.
-                audios, sr = model.generate_voice_design(text=text, instruct=f"Speak as {voice}.", language=language)
+                audios, sr = model.generate_custom_voice(
+                    text=text, language=lang, speaker=voice,
+                )
+            except Exception as e1:
+                log.warning(f"[tts.model.custom.fail] {e1} — falling back to voice_design")
+                audios, sr = model.generate_voice_design(
+                    text=text, language=lang, instruct=f"Speak as {voice}.",
+                )
+
+    log.info(f"[tts.model.done] elapsed={time.time()-t0:.2f}s")
 
     audio = audios[0] if isinstance(audios, (list, tuple)) else audios
     if hasattr(audio, "cpu"):
         audio = audio.cpu().numpy()
-    return np.asarray(audio, dtype=np.float32).reshape(-1), int(sr)
+    out = np.asarray(audio, dtype=np.float32).reshape(-1)
+    log.info(f"[tts.synth.done] samples={out.shape[0]} sr={int(sr)} duration_s={out.shape[0]/max(int(sr),1):.2f}")
+    return out, int(sr)
 
 
 @app.post("/v1/audio/speech")
@@ -216,14 +377,28 @@ async def speech(req: SpeechRequest) -> Response:
     touch_activity()
     if not req.input.strip():
         raise HTTPException(400, "input must be non-empty")
+    if model is None:
+        raise HTTPException(503, f"model not ready: {load_error or 'still loading'}")
+    log.info(f"[tts.req.speech] voice={req.voice} fmt={req.response_format} "
+             f"text_len={len(req.input)}")
     async with inference_lock:
         try:
-            audio, sr = await asyncio.get_event_loop().run_in_executor(
-                None, _synth, req.input, req.voice, req.speed,
+            audio, sr = await asyncio.wait_for(
+                asyncio.get_event_loop().run_in_executor(
+                    None, _synth, req.input, req.voice, req.speed,
+                    None, None, None, req.language,
+                ),
+                timeout=TIMEOUT_S,
             )
+        except asyncio.TimeoutError:
+            log.error(f"[tts.req.timeout] timeout={TIMEOUT_S}s")
+            raise HTTPException(504, f"synthesis timed out after {TIMEOUT_S}s")
         except Exception as exc:
+            import traceback
+            log.error(f"[tts.req.fail] {exc}\n{traceback.format_exc()}")
             raise HTTPException(500, f"synthesis failed: {exc}")
     body, ctype = _encode(audio, req.response_format, sr)
+    log.info(f"[tts.req.resp] bytes={len(body)} ctype={ctype}")
     return Response(content=body, media_type=ctype)
 
 
@@ -234,6 +409,7 @@ async def speech_clone(
     ref_text: str = Form(""),
     response_format: str = Form("wav"),
     speed: float = Form(1.0),
+    language: Optional[str] = Form(None),
 ) -> Response:
     """Voice-cloned synthesis. `reference_audio` is a 5-30s clip (any sample
     rate; we resample to 24 kHz mono internally). `ref_text` is the literal
@@ -242,24 +418,41 @@ async def speech_clone(
     touch_activity()
     if not text.strip():
         raise HTTPException(400, "text must be non-empty")
+    if model is None:
+        raise HTTPException(503, f"model not ready: {load_error or 'still loading'}")
 
+    log.info(f"[tts.req.clone] text_len={len(text)} ref_text_len={len(ref_text)} "
+             f"fmt={response_format}")
     raw = await reference_audio.read()
+    log.info(f"[tts.req.clone.read] ref_bytes={len(raw)}")
     try:
         ref_audio, ref_sr = sf.read(io.BytesIO(raw), dtype="float32")
     except Exception as exc:
         raise HTTPException(400, f"could not decode reference_audio: {exc}")
     if ref_audio.ndim > 1:
         ref_audio = ref_audio.mean(axis=1)
+    log.info(f"[tts.req.clone.decoded] ref_samples={ref_audio.shape[0]} ref_sr={int(ref_sr)} "
+             f"ref_dur={ref_audio.shape[0]/max(int(ref_sr),1):.2f}s")
 
     async with inference_lock:
         try:
-            audio, sr = await asyncio.get_event_loop().run_in_executor(
-                None, _synth, text, "Ryan", speed, ref_audio, ref_sr, ref_text,
+            audio, sr = await asyncio.wait_for(
+                asyncio.get_event_loop().run_in_executor(
+                    None, _synth, text, "Ryan", speed,
+                    ref_audio, int(ref_sr), ref_text, language,
+                ),
+                timeout=TIMEOUT_S,
             )
+        except asyncio.TimeoutError:
+            log.error(f"[tts.req.clone.timeout] timeout={TIMEOUT_S}s")
+            raise HTTPException(504, f"voice-clone timed out after {TIMEOUT_S}s")
         except Exception as exc:
+            import traceback
+            log.error(f"[tts.req.clone.fail] {exc}\n{traceback.format_exc()}")
             raise HTTPException(500, f"voice-clone synthesis failed: {exc}")
 
     body, ctype = _encode(audio, response_format, sr)
+    log.info(f"[tts.req.clone.resp] bytes={len(body)} ctype={ctype}")
     return Response(content=body, media_type=ctype)
 
 

@@ -31,6 +31,11 @@ ENV DEBIAN_FRONTEND=noninteractive \
     IDLE_TIMEOUT_MIN=15 \
     QWEN3_TTS_MODEL=Qwen/Qwen3-TTS-12Hz-1.7B-Base \
     QWEN3_TTS_TOKENIZER=Qwen/Qwen3-TTS-Tokenizer-12Hz \
+    QWEN3_TTS_DTYPE=bfloat16 \
+    QWEN3_TTS_ATTN=sdpa \
+    QWEN3_TTS_LANG=English \
+    QWEN3_TTS_TIMEOUT_S=120 \
+    QWEN3_TTS_WARMUP=1 \
     HF_HUB_ENABLE_HF_TRANSFER=1
 
 RUN apt-get update -qq && apt-get install -y --no-install-recommends \
@@ -47,14 +52,18 @@ RUN apt-get update -qq && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # PyTorch + Qwen runtime. Pin to CUDA 12.4 wheels matching the base image.
-# `qwen-tts` is the official Alibaba helper (see https://pypi.org/project/qwen-tts);
+# `qwen-tts==0.1.1` is the official Alibaba helper (see
+# https://pypi.org/project/qwen-tts) — pin EXACT version because earlier
+# wheels had a different generate_voice_clone signature that caused the
+# request hang in the previous build (kwargs silently dropped).
 # `faster-qwen3-tts` adds CUDA-graph fast paths when present.
 RUN pip install --upgrade pip \
     && pip install \
          "torch==2.5.1+cu124" "torchvision==0.20.1+cu124" "torchaudio==2.5.1+cu124" \
          --index-url https://download.pytorch.org/whl/cu124 \
     && pip install \
-         "transformers>=4.57" "accelerate>=1.0" "qwen-tts>=0.1.1" "faster-qwen3-tts>=0.2.1" \
+         "transformers>=4.57,<5" "accelerate>=1.0" \
+         "qwen-tts==0.1.1" "faster-qwen3-tts>=0.2.1" \
          "fastapi>=0.115" "uvicorn[standard]>=0.32" python-multipart \
          hf_transfer huggingface_hub soundfile numpy librosa pydantic-settings
 
