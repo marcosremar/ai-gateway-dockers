@@ -362,13 +362,17 @@ def _synth(text: str, voice: str, speed: float = 1.0,
             if ref_arr.shape[0] > MAX_REF_S * SAMPLE_RATE:
                 ref_arr = ref_arr[: MAX_REF_S * SAMPLE_RATE]
                 log.info(f"[tts.model.ref.trim] truncated ref to {MAX_REF_S}s")
-            # Cap max_new_tokens proportional to text length. Without
-            # flash-attn the talker LM can't reliably sample EOS and runs
-            # to the default 2048 cap, producing 60-600s of garbage for
-            # short inputs. ~12 codec frames per second of audio, English
-            # speech ~10 chars/sec → ~14 codec tokens per char + 100
-            # token slack. With flash-attn EOS works → cap is harmless.
-            est_tokens = min(2048, max(256, len(text) * 14 + 100))
+            # Cap max_new_tokens proportional to text length. Codec is
+            # 12.5Hz mono audio → 1 codec token = 80ms of audio. English
+            # speech ~14 chars/sec → 1 char ≈ 0.07s ≈ 0.9 codec tokens.
+            # Even with flash-attn the talker LM frequently fails to emit
+            # EOS for short conditioning text and runs to whatever cap we
+            # set, producing trailing garble. Use 2 tokens/char + 60 slack:
+            #   - 10 chars → 80 tokens → 6.4s ceiling
+            #   - 91 chars → 242 tokens → 19s ceiling
+            #   - 500 chars → 1060 tokens → 85s ceiling
+            # Trailing silence is trimmed below.
+            est_tokens = min(2048, max(80, len(text) * 2 + 60))
             log.info(f"[tts.model.call] generate_voice_clone "
                      f"ref_samples={ref_arr.shape[0]} ref_sr={SAMPLE_RATE} "
                      f"ref_text_len={len(ref_text or '')} max_new_tokens={est_tokens}")
@@ -401,7 +405,19 @@ def _synth(text: str, voice: str, speed: float = 1.0,
     if hasattr(audio, "cpu"):
         audio = audio.cpu().numpy()
     out = np.asarray(audio, dtype=np.float32).reshape(-1)
-    log.info(f"[tts.synth.done] samples={out.shape[0]} sr={int(sr)} duration_s={out.shape[0]/max(int(sr),1):.2f}")
+    raw_dur = out.shape[0] / max(int(sr), 1)
+    # Trim trailing silence + leading silence. Qwen3-TTS-Base often emits
+    # 5-15× excess audio after the real content because the talker LM
+    # rarely samples EOS — the tail is low-amplitude noise/repetition.
+    try:
+        import librosa  # type: ignore
+        trimmed, _ = librosa.effects.trim(out, top_db=35, frame_length=2048, hop_length=512)
+        if trimmed.shape[0] >= int(0.3 * sr):
+            out = trimmed
+    except Exception as e:
+        log.warning(f"[tts.synth.trim.skip] {e}")
+    log.info(f"[tts.synth.done] samples={out.shape[0]} sr={int(sr)} "
+             f"duration_s={out.shape[0]/max(int(sr),1):.2f} raw_s={raw_dur:.2f}")
     return out, int(sr)
 
 
