@@ -363,19 +363,24 @@ def _synth(text: str, voice: str, speed: float = 1.0,
                 ref_arr = ref_arr[: MAX_REF_S * SAMPLE_RATE]
                 log.info(f"[tts.model.ref.trim] truncated ref to {MAX_REF_S}s")
             # Cap max_new_tokens proportional to text length. Codec is
-            # 12.5Hz mono audio → 1 codec token = 80ms of audio. English
-            # speech ~14 chars/sec → 1 char ≈ 0.07s ≈ 0.9 codec tokens.
-            # Even with flash-attn the talker LM frequently fails to emit
-            # EOS for short conditioning text and runs to whatever cap we
-            # set, producing trailing garble. Use 2 tokens/char + 60 slack:
-            #   - 10 chars → 80 tokens → 6.4s ceiling
-            #   - 91 chars → 242 tokens → 19s ceiling
-            #   - 500 chars → 1060 tokens → 85s ceiling
-            # Trailing silence is trimmed below.
-            est_tokens = min(2048, max(80, len(text) * 2 + 60))
+            # 12.5Hz mono → 1 codec token = 80ms. English speech ~14
+            # chars/sec → 1 char ≈ 0.9 codec tokens. The official default
+            # is 8192 (no per-call cap), but with our sampling params the
+            # model usually emits EOS — keep cap as safety net at 3
+            # tokens/char + 100 slack:
+            #   - 10 chars → 130 tokens → 10s ceiling
+            #   - 91 chars → 373 tokens → 30s ceiling
+            #   - 500 chars → 1600 tokens → 128s ceiling
+            # Trailing garble is cut by VAD silence-detection below.
+            est_tokens = min(2048, max(130, len(text) * 3 + 100))
             log.info(f"[tts.model.call] generate_voice_clone "
                      f"ref_samples={ref_arr.shape[0]} ref_sr={SAMPLE_RATE} "
                      f"ref_text_len={len(ref_text or '')} max_new_tokens={est_tokens}")
+            # Sampling params per official generation_config.json. Earlier
+            # tests with temp=0.7 / rep_penalty=1.1 produced 60Hz pitch
+            # shift away from ref (115Hz male ref → 184Hz tenor output);
+            # the higher temp + lower rep penalty matches the 0.89 speaker
+            # similarity benchmark from the Qwen3-TTS technical report.
             audios, sr = model.generate_voice_clone(
                 text=text,
                 language=lang,
@@ -384,8 +389,10 @@ def _synth(text: str, voice: str, speed: float = 1.0,
                 x_vector_only_mode=not bool(ref_text),
                 max_new_tokens=est_tokens,
                 do_sample=True,
-                temperature=0.7,
-                repetition_penalty=1.1,
+                temperature=0.9,
+                top_p=1.0,
+                top_k=50,
+                repetition_penalty=1.05,
             )
         else:
             log.info(f"[tts.model.call] generate_custom_voice speaker={voice}")
