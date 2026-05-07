@@ -172,10 +172,12 @@ def _load_model() -> None:
 def _warmup() -> None:
     """JIT CUDA kernels + verify the synthesis path works end-to-end.
 
-    Catches lazy-init bugs (kernel compilation, codec download, lock
-    initialization) at boot rather than on the first user request — which
-    is what makes the bug 'manifest as a hang'. If warmup fails, the
-    /health response surfaces it so the gateway redeploys.
+    The Base checkpoint (Qwen3-TTS-12Hz-1.7B-Base) only supports
+    generate_voice_clone (NOT generate_custom_voice / generate_voice_design),
+    so warm up via a tiny clone with a 1-second silent ref. CustomVoice
+    and VoiceDesign checkpoints fall back to the preset path. Auto-detect
+    by trying preset first then catching the
+    "does not support generate_custom_voice" ValueError.
     """
     global warmup_ok, warmup_error
     if model is None:
@@ -185,9 +187,22 @@ def _warmup() -> None:
         log.info("[tts.warmup.start]")
         t0 = time.time()
         with torch.inference_mode():
-            audios, sr = model.generate_custom_voice(
-                text="Hello.", language=DEFAULT_LANG, speaker="Ryan",
-            )
+            try:
+                audios, sr = model.generate_custom_voice(
+                    text="Hello.", language=DEFAULT_LANG, speaker="Ryan",
+                )
+            except (ValueError, AttributeError, NotImplementedError) as e:
+                if "does not support" in str(e) or "not implemented" in str(e).lower():
+                    log.info(f"[tts.warmup.fallback] preset unsupported; using clone with silent ref")
+                    silent_ref = np.zeros(SAMPLE_RATE * 3, dtype=np.float32)  # 3s silence
+                    audios, sr = model.generate_voice_clone(
+                        text="Hello.", language=DEFAULT_LANG,
+                        ref_audio=(silent_ref, SAMPLE_RATE),
+                        ref_text="", x_vector_only_mode=True,
+                        max_new_tokens=256, do_sample=True, temperature=0.7,
+                    )
+                else:
+                    raise
         audio = audios[0] if isinstance(audios, (list, tuple)) else audios
         if hasattr(audio, "cpu"):
             audio = audio.cpu().numpy()
@@ -340,15 +355,33 @@ def _synth(text: str, voice: str, speed: float = 1.0,
     with torch.inference_mode():
         if reference_audio is not None:
             ref_arr = _resample_mono(reference_audio, int(reference_sr or 24_000), SAMPLE_RATE)
+            # Truncate ref to first 15s — Qwen3-TTS-Base recommends 3-30s
+            # references, and longer clips empirically degrade the prosody
+            # encoder (it produced 2s outputs for full 5min refs in tests).
+            MAX_REF_S = int(os.environ.get("QWEN3_TTS_MAX_REF_S", "15"))
+            if ref_arr.shape[0] > MAX_REF_S * SAMPLE_RATE:
+                ref_arr = ref_arr[: MAX_REF_S * SAMPLE_RATE]
+                log.info(f"[tts.model.ref.trim] truncated ref to {MAX_REF_S}s")
+            # Cap max_new_tokens proportional to text length. Without
+            # flash-attn the talker LM can't reliably sample EOS and runs
+            # to the default 2048 cap, producing 60-600s of garbage for
+            # short inputs. ~12 codec frames per second of audio, English
+            # speech ~10 chars/sec → ~14 codec tokens per char + 100
+            # token slack. With flash-attn EOS works → cap is harmless.
+            est_tokens = min(2048, max(256, len(text) * 14 + 100))
             log.info(f"[tts.model.call] generate_voice_clone "
                      f"ref_samples={ref_arr.shape[0]} ref_sr={SAMPLE_RATE} "
-                     f"ref_text_len={len(ref_text or '')}")
+                     f"ref_text_len={len(ref_text or '')} max_new_tokens={est_tokens}")
             audios, sr = model.generate_voice_clone(
                 text=text,
                 language=lang,
                 ref_audio=(ref_arr, SAMPLE_RATE),
                 ref_text=ref_text or "",
                 x_vector_only_mode=not bool(ref_text),
+                max_new_tokens=est_tokens,
+                do_sample=True,
+                temperature=0.7,
+                repetition_penalty=1.1,
             )
         else:
             log.info(f"[tts.model.call] generate_custom_voice speaker={voice}")

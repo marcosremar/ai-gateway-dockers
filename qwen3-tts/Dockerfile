@@ -32,10 +32,10 @@ ENV DEBIAN_FRONTEND=noninteractive \
     QWEN3_TTS_MODEL=Qwen/Qwen3-TTS-12Hz-1.7B-Base \
     QWEN3_TTS_TOKENIZER=Qwen/Qwen3-TTS-Tokenizer-12Hz \
     QWEN3_TTS_DTYPE=bfloat16 \
-    QWEN3_TTS_ATTN=sdpa \
+    QWEN3_TTS_ATTN=flash_attention_2 \
     QWEN3_TTS_LANG=English \
-    QWEN3_TTS_TIMEOUT_S=120 \
-    QWEN3_TTS_WARMUP=1 \
+    QWEN3_TTS_TIMEOUT_S=600 \
+    QWEN3_TTS_WARMUP=0 \
     HF_HUB_ENABLE_HF_TRANSFER=1
 
 RUN apt-get update -qq && apt-get install -y --no-install-recommends \
@@ -61,11 +61,20 @@ RUN pip install --upgrade pip \
     && pip install \
          "torch==2.5.1+cu124" "torchvision==0.20.1+cu124" "torchaudio==2.5.1+cu124" \
          --index-url https://download.pytorch.org/whl/cu124 \
+    && pip install packaging ninja \
     && pip install \
          "transformers>=4.57,<5" "accelerate>=1.0" \
          "qwen-tts==0.1.1" "faster-qwen3-tts>=0.2.1" \
          "fastapi>=0.115" "uvicorn[standard]>=0.32" python-multipart \
-         hf_transfer huggingface_hub soundfile numpy librosa pydantic-settings
+         hf_transfer huggingface_hub soundfile numpy librosa pydantic-settings \
+    # flash-attn is REQUIRED for stable Qwen3-TTS-Base voice-clone generation.
+    # Without it, the qwen-tts library prints
+    #   "Warning: flash-attn is not installed. Will only run the manual PyTorch version."
+    # and the manual path produces unreliable EOS sampling — the model
+    # generates audio until it hits max_new_tokens, yielding 30-600s of
+    # repeated/garbled output for short texts. Building flash-attn from
+    # source so the wheel matches the torch 2.5 / cu124 ABI.
+    && MAX_JOBS=2 pip install "flash-attn==2.7.4.post1" --no-build-isolation
 
 COPY server.py            /app/server.py
 COPY idle_watchdog.py     /app/idle_watchdog.py
