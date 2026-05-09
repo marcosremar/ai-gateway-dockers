@@ -133,3 +133,18 @@ async def generate(
             "X-Pipeline-Type": pipeline_type,
         },
     )
+
+
+# ── Module entry point ─────────────────────────────────────────────────────
+# `start.sh` runs `python -u /app/server.py`, so the file needs a __main__
+# block to actually launch uvicorn — without this the FastAPI app object is
+# constructed and Python exits, the container's :8000 never binds, and Modal
+# trips with `TimeoutError: Waited too long for port 8000`.
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(
+        app,
+        host=os.environ.get("HOST", "0.0.0.0"),
+        port=int(os.environ.get("PORT", "8000")),
+        log_level=os.environ.get("LOG_LEVEL", "info"),
+    )
