@@ -92,22 +92,30 @@ jobs:
           # these fails the model loader masks the error as a bogus HF 404:
           import plyfile; print('plyfile OK')
           import nvdiffrast; print('nvdiffrast OK')
-          # Try importing o_voxel — this is what actually fails at runtime
-          # when nvdiffrast or plyfile is missing:
-          from o_voxel import io as ovio, postprocess
-          print('o_voxel OK')
-          # Verify trellis2 pipeline can at least be imported (no model needed).
-          # The pipeline module touches torch.cuda at import time, which raises
+          # o_voxel + trellis2.pipelines both transitively import flex_gemm
+          # (Triton kernels) and torch.cuda at module load. On a CPU-only CI
+          # runner that raises:
           #   RuntimeError: 0 active drivers ([]). There should only be one.
-          # on CPU-only CI runners. The import is therefore wrapped: a CUDA
-          # error here does NOT fail the smoke test (we already verified the
-          # transitive native deps — nvdiffrast, o_voxel, plyfile — load fine).
-          # Other ImportError / SyntaxError still trip the test.
+          # The import is wrapped so a CUDA-init RuntimeError doesn't fail
+          # the smoke test (we already verified the load-bearing native
+          # deps above: nvdiffrast, plyfile). ImportError / SyntaxError /
+          # any other error still trip the test.
+          def cuda_init_failure(exc):
+              s = str(exc)
+              return 'active drivers' in s or 'CUDA' in s.upper() or 'driver' in s.lower()
+          try:
+              from o_voxel import io as ovio, postprocess  # noqa: F401
+              print('o_voxel OK')
+          except RuntimeError as exc:
+              if cuda_init_failure(exc):
+                  print(f'o_voxel CUDA-init skipped on CPU runner: {exc}')
+              else:
+                  raise
           try:
               from trellis2.pipelines import Trellis2ImageTo3DPipeline  # noqa: F401
               print('trellis2 pipeline import OK')
           except RuntimeError as exc:
-              if 'active drivers' in str(exc) or 'CUDA' in str(exc).upper():
+              if cuda_init_failure(exc):
                   print(f'trellis2 pipeline CUDA-init skipped on CPU runner: {exc}')
               else:
                   raise
