@@ -18,7 +18,7 @@ def load_model():
     print(f"Loading SAM2-large on {device}...")
 
     model = build_sam2(
-        "sam2.1_hiera_large",
+        "configs/sam2.1/sam2.1_hiera_l.yaml",
         "/checkpoints/sam2.1_hiera_large.pt",
         device=device,
     )
