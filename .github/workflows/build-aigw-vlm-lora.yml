@@ -1,0 +1,66 @@
+name: Build aigw-vlm-lora Docker image
+
+# Prebaked LoRA/QLoRA fine-tune image (torch+transformers+peft+trl+bitsandbytes
+# +unsloth+flash-attn) so finetune job pods don't reinstall the stack per run.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "aigw-vlm-lora/**"
+      - ".github/workflows/build-aigw-vlm-lora.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache /usr/local/share/boost /usr/share/swift \
+            /usr/local/graalvm /usr/local/share/chromium /usr/local/share/powershell \
+            /usr/local/.ghcup /opt/az /usr/share/miniconda /usr/local/go \
+            /usr/local/julia* /usr/local/sqlpackage /opt/microsoft /usr/local/aws-cli
+          sudo apt-get purge -y -qq firefox google-chrome-stable \
+            microsoft-edge-stable dotnet* aspnetcore* 2>/dev/null || true
+          sudo apt-get autoremove -y -qq && sudo apt-get clean
+          docker system prune -af
+          echo "Free space:" && df -h /
+
+      - name: Verify build context
+        run: |
+          ls -la aigw-vlm-lora/
+          test -f aigw-vlm-lora/Dockerfile || { echo "ERROR: Dockerfile missing"; exit 1; }
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push aigw-vlm-lora
+        uses: docker/build-push-action@v6
+        with:
+          context: aigw-vlm-lora
+          file: aigw-vlm-lora/Dockerfile
+          push: true
+          tags: |
+            marcosremar/aigw-vlm-lora:latest
+            marcosremar/aigw-vlm-lora:${{ github.sha }}
+            ghcr.io/marcosremar/aigw-vlm-lora:latest
+            ghcr.io/marcosremar/aigw-vlm-lora:${{ github.sha }}
+          cache-from: type=gha,scope=aigw-vlm-lora
+          cache-to: type=gha,mode=max,scope=aigw-vlm-lora
