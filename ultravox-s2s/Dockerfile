@@ -13,8 +13,13 @@ WORKDIR /app
 
 # ── System dependencies ──
 # aria2 + zstd: multi-connection downloads (~30% faster than curl/single-stream)
+# crun: C-based OCI runtime, ~2x faster container startup than runc. See the
+# babelcast-subtitle Dockerfile for the full rationale — TL;DR: RunPod/Vast.ai
+# don't expose `--runtime` via their APIs so installing crun here is forward-
+# compatible plumbing (lets TensorDock cloud-init or self-hosted hosts pick it
+# without another rebuild). Cold-start plan A5.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ffmpeg libsndfile1 sox libsox-dev curl aria2 zstd \
+    ffmpeg libsndfile1 sox libsox-dev curl aria2 zstd crun \
     libgomp1 libsndfile1-dev \
     && rm -rf /var/lib/apt/lists/*
 

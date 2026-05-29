@@ -25,9 +25,16 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 # System deps — minimal for inference only
 # aria2 + zstd: multi-connection downloads (~30% faster than curl/single-stream)
+# crun: C-based OCI runtime, ~2x faster container startup than runc. Included
+# here so it is available as the in-image OCI runtime when the host selects
+# it. Whether it is actually used depends on the host's Docker runtime
+# configuration — on RunPod / Vast.ai the runtime is fixed by the provider
+# (no --runtime flag exposed via their API), so this install is forward-
+# compatible plumbing: a later TensorDock cloud-init (or self-hosted pod)
+# can point Docker at crun without another image rebuild.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.11 python3.11-venv python3.11-dev python3-pip \
-    ffmpeg libsndfile1 curl aria2 zstd && \
+    ffmpeg libsndfile1 curl aria2 zstd crun && \
     ln -sf /usr/bin/python3.11 /usr/bin/python3 && \
     rm -rf /var/lib/apt/lists/*
 
@@ -53,12 +60,19 @@ RUN curl -L -o /tmp/llama_cpp_python-${LLAMA_CPP_VERSION}-cp311-cp311-linux_x86_
 # Step 3: Everything else from PyPI
 # huggingface_hub >= 0.32 auto-installs hf_xet as a dependency; we pin it
 # explicitly so the Xet backend is always active (validated as fastest in bench).
+#
+# fastsafetensors: 4.8-7.5× faster tensor load on decoder-only LLMs
+# (Gemma/Llama/Mistral/Qwen). Encoder-decoder (Whisper/T5/BART) is routed
+# through the standard safetensors loader by llm-loader.py — fallback is
+# automatic if the fast path raises.
 RUN pip install --no-cache-dir \
     "faster-whisper>=1.2.1" \
     "ctranslate2>=4.7.1" \
     httpx \
     "huggingface-hub>=1.0.0" \
     "hf_xet>=1.4.0" \
+    "safetensors>=0.4.5" \
+    "fastsafetensors>=0.1.14" \
     python-multipart \
     uvicorn[standard] \
     fastapi
@@ -97,6 +111,7 @@ del m" \
 
 COPY server.py .
 COPY idle_watchdog.py .
+COPY llm-loader.py .
 COPY start.sh .
 RUN chmod +x start.sh
 
