@@ -38,7 +38,7 @@ RUN pip install --no-cache-dir unsloth unsloth_zoo || \
 # for a small LoRA run. Add it back later if training throughput matters.
 
 # Materialize .pyc + surface import errors at build time, not run time.
-RUN python -c "import torch, transformers, peft, trl, bitsandbytes, datasets; \
+RUN python3 -c "import torch, transformers, peft, trl, bitsandbytes, datasets; \
 print('[bake] vlm-lora stack ok — torch', torch.__version__)"
 
 RUN mkdir -p /workspace/.hf_cache
