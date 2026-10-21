@@ -100,6 +100,9 @@ async def _load_pipeline():
                 log.info("Loading full pipeline to GPU")
                 p = p.to("cuda")
 
+            # Tiled VAE decode reduces peak VRAM for large resolutions (2048×1024)
+            p.vae.enable_tiling()
+
             return p
 
         service_status["pipeline"] = "loading"
@@ -129,6 +132,8 @@ async def _load_upscaler():
             from basicsr.archs.rrdbnet_arch import RRDBNet
 
             model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=4)
+            # Always load upscaler on CPU to preserve GPU VRAM for the diffusion pipeline.
+            # Real-ESRGAN is fast enough on CPU for our use case.
             return RealESRGANer(
                 scale=4,
                 model_path="https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth",
@@ -136,8 +141,8 @@ async def _load_upscaler():
                 tile=400,  # Tile size for large images (prevents OOM)
                 tile_pad=10,
                 pre_pad=0,
-                half=True,  # fp16 for speed
-                device="cuda" if DEVICE == "cuda" else "cpu",
+                half=False,  # CPU doesn't support fp16
+                device="cpu",
             )
 
         upscaler = await asyncio.to_thread(_load)
@@ -285,6 +290,9 @@ async def generate_image(request: Request):
     t0 = time.time()
 
     def _generate():
+        # Free fragmented PyTorch VRAM cache before inference
+        if DEVICE == "cuda":
+            torch.cuda.empty_cache()
         result = pipe(
             full_prompt,
             width=width,

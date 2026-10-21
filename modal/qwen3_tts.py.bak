@@ -1,0 +1,92 @@
+"""Modal deploy: Qwen3-TTS server with voice-clone endpoint, built from
+local sources (no external git clone). Replaces the brittle babelcast-docker
+sparse-checkout dependency that broke the standard `tts.py` template.
+
+Endpoints exposed (matches `ai-gateway-dockers/qwen3-tts/server.py`):
+
+  GET  /health
+  GET  /v1/audio/voices
+  POST /v1/audio/speech         JSON {input, voice, response_format}
+  POST /v1/audio/speech/clone   multipart {text, reference_audio, ref_text,
+                                           response_format, language?}
+
+Usage:
+  modal deploy modal/qwen3_tts_clone.py
+
+The container starts cold (~3 min model download on first boot, ~30s after).
+We keep `min_containers=1` so the gateway always finds a warm worker;
+`scaledown_window=600` lets it settle after 10 idle minutes to control cost.
+
+Required infra: Modal token configured (`modal token new`). The gateway
+discovers the Modal-hosted endpoint via `modal app list` once deployed and
+the URL is published in this file's `_modal_url` log line.
+"""
+
+from pathlib import Path
+
+import modal
+
+ROOT = Path(__file__).resolve().parent.parent / "qwen3-tts"
+
+app = modal.App("canal-dark-qwen3-tts")
+
+image = (
+    modal.Image.debian_slim(python_version="3.11")
+    .apt_install("ffmpeg", "git")
+    .run_commands(
+        # Pinned versions match the ai-gateway-dockers/qwen3-tts/Dockerfile
+        # — keep in sync if you bump there.
+        "pip install --no-cache-dir torch==2.5.1 torchaudio==2.5.1 "
+        "--index-url https://download.pytorch.org/whl/cu124",
+        "pip install --no-cache-dir transformers==4.57.3 accelerate==1.12.0 "
+        "qwen-tts soundfile numpy librosa",
+        "pip install --no-cache-dir 'fastapi>=0.115.0' "
+        "'uvicorn[standard]>=0.32.0' python-multipart httpx pydantic",
+        # Same upstream-bug shim as the Vast docker — qwen-tts 0.1.x ships a
+        # stale `fix_mistral_regex` kwarg that current transformers rejects.
+        "find / -path '*/qwen_tts/*.py' -exec sed -i "
+        "'s/fix_mistral_regex=True,//' {} + 2>/dev/null; echo ok",
+        "find / -name '*.pyc' -path '*/qwen_tts/*' -delete 2>/dev/null; echo ok",
+        "python3 -c 'from qwen_tts import Qwen3TTSModel; print(\"qwen-tts OK\")'",
+    )
+    # Pre-download model weights into the image — cold-start drops from
+    # ~3 min to <30s. Worth it for a TTS path that's hit once per chunk.
+    .run_commands(
+        "python3 -c \""
+        "from huggingface_hub import snapshot_download; "
+        "snapshot_download('Qwen/Qwen3-TTS-12Hz-1.7B-Base', cache_dir='/models'); "
+        "print('cached')\"",
+    )
+    .add_local_file(str(ROOT / "server.py"), "/app/server.py")
+    .add_local_file(str(ROOT / "idle_watchdog.py"), "/app/idle_watchdog.py")
+)
+
+_func_kwargs = dict(
+    image=image,
+    # T4 — 16GB VRAM, $0.59/h. Qwen3-TTS-12Hz-1.7B-Base bf16 fits in
+    # ~8GB so T4 has plenty of headroom. Drops the GPU bill from $1.95/h
+    # (L40S) to $0.59/h — 3.3× cheaper for the same per-chunk synth time
+    # (~7s steady-state).
+    gpu="T4",
+    timeout=900,
+    # Scale to zero after 60s idle. Cold-start is ~60s with weights
+    # pre-cached in the image; pipeline has retry-on-503 already.
+    scaledown_window=60,
+    min_containers=0,
+)
+
+
+@app.function(**_func_kwargs)
+@modal.concurrent(max_inputs=2)
+@modal.web_server(port=8000, startup_timeout=600)
+def serve():
+    """Boot the Qwen3-TTS FastAPI server bundled in /app/server.py."""
+    import os
+    import subprocess
+
+    os.environ.setdefault("HF_HOME", "/models")
+    os.environ.setdefault("TRANSFORMERS_CACHE", "/models")
+    os.chdir("/app")
+    subprocess.Popen(
+        ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8000"]
+    )
